@@ -1,4 +1,5 @@
 from datetime import date
+import uuid
 
 from .commands import Command
 from .config import Settings
@@ -11,10 +12,16 @@ from .storage import Repository
 class AssistantService:
     def __init__(self, settings: Settings, repo: Repository, adapter, notifier=None):
         self.settings, self.repo, self.adapter, self.notifier = settings, repo, adapter, notifier
+        self.account_id = settings.account_id
 
-    def reserve_period(self, day: str, period_name: str, arrival_override: str | None = None):
+    def run_once(self, day: str):
+        from .scheduler import run_once
+        return run_once(self, day)
+
+    def reserve_period(self, day: str, period_name: str, arrival_override: str | None = None, quota_day: str | None = None):
         if period_name not in self.settings.periods:
             return SeatResult(False, message=f"未知学习时段：{period_name}")
+        quota_day = quota_day or date.today().isoformat()
         period = self.settings.periods[period_name]
         existing = self.repo.get_reservation(day, period_name)
         if existing and existing["status"] == "reserved":
@@ -27,6 +34,8 @@ class AssistantService:
                 if status == "uncertain":
                     return SeatResult(False, room, seat, "同一天已有一次预约，但上次结果不明确；已停止重试", conclusive=False)
                 return SeatResult(False, room, seat, "当天已有预约，学校限制同一天只能预约一个时间段", conclusive=True)
+        if self.repo.successful_booking_count(quota_day) >= self.settings.daily_success_limit:
+            return SeatResult(False, message=f"账号今日成功预约次数已达到 {self.settings.daily_success_limit} 次，跳过本次运行")
         expected = arrival_override or self.repo.default_override(period_name) or self.repo.learned_default(period_name, period.default_arrival)
         try:
             expected_time = parse_hhmm(expected)
@@ -42,6 +51,8 @@ class AssistantService:
             result = SeatResult(False, message=f"预约适配器异常：{exc}", conclusive=False)
         status = "reserved" if result.success else "uncertain" if not result.conclusive else "failed"
         self.repo.save_reservation(day, period_name, status, start, end, result.room, result.seat, result.message)
+        if result.success:
+            self.repo.record_successful_booking(quota_day, f"{period_name}:{uuid.uuid4().hex}")
         send_reservation_notification(self.notifier, day, period_name, result, start, end)
         return result
 

@@ -8,6 +8,7 @@
 - 图书馆：`南校区第二图书馆`
 - 示例阅览室：`4层计算机类借阅区`（真实 `roomId=34`）
 - 本地 Chrome 持久化会话：`.browser-profile`
+- 多账号会话目录：`accounts/<账号ID>/browser-profile`（最多 20 个账号）
 
 ## 1. 项目目的与需求
 
@@ -25,7 +26,8 @@
 - 预约时间必须按整 30 分钟填写，例如 `08:00`、`15:30`。
 - 程序只负责网站预约，不模拟学生卡刷卡、签到、暂离、回馆或结束使用。
 - 预约成功后仍需按学校规则到馆签到；离馆时必须在触屏机上正确操作，否则可能产生违规记录。
-- 密码只从本机 `.env` 读取，不写入日志、README 或提交到代码仓库。
+- 单账号密码从本机 `.env` 读取；多账号密码只从本机 `accounts.json` 读取，不写入日志、README 或提交到代码仓库。
+- 多账号时每个账号必须使用独立的会话目录和数据库；账号之间不共享 Cookie、LocalStorage 或预约状态。
 
 ## 2. 总体技术路线
 
@@ -119,6 +121,33 @@ Invoke-RestMethod http://127.0.0.1:8765/api/v1/commands -Method Post -Headers $h
 
 ## 5. 安装与运行
 
+### 多账号配置
+
+不创建 `accounts.json` 时，程序继续兼容现有的 `SEAT_ACCOUNT`、`SEAT_PASSWORD` 和 `.browser-profile` 单账号模式。需要管理多个账号时，复制 `accounts.example.json` 为本地 `accounts.json`，每个账号填写唯一的 `id`、校园账号和密码：
+
+```json
+{
+  "accounts": [
+    {
+      "id": "alice",
+      "account": "统一认证账号A",
+      "password": "密码A",
+      "wecom_webhook": ""
+    },
+    {
+      "id": "bob",
+      "account": "统一认证账号B",
+      "password": "密码B",
+      "wecom_webhook": ""
+    }
+  ]
+}
+```
+
+每个账号的浏览器会话和数据库默认分别放在 `accounts/<id>/browser-profile`、`accounts/<id>/seat_assistant.db`。账号配置最多 20 个，账号 ID 和校园账号不能重复。`accounts.json`、`accounts/` 和其中的密码、Cookie、数据库均已加入 Git 忽略。
+
+调度器每天按配置顺序串行执行账号任务，账号之间默认等待 15 秒，不并发访问学校系统。每个账号每天最多记录 3 次“新预约且已核验成功”；失败、登录失败、验证码失败、超时、结果不明确和复用已有预约都不计入成功次数。成功次数按账号和日期隔离保存。
+
 ### 配置本机凭据
 
 ```powershell
@@ -134,19 +163,34 @@ SEAT_CONTROL_TOKEN=请设置一段较长的随机令牌
 SEAT_DRY_RUN=true
 SEAT_WECOM_WEBHOOK=企业微信群机器人的Webhook地址
 SEAT_MAX_RESERVATIONS_PER_RUN=1
+SEAT_DAILY_SUCCESS_LIMIT=3
+SEAT_ACCOUNT_INTERVAL_SECONDS=15
+# Optional captcha vision fallback (Qwen compatible API; disabled by default)
+SEAT_CAPTCHA_LLM_ENABLED=false
+SEAT_CAPTCHA_LLM_API_KEY=
+SEAT_CAPTCHA_LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+SEAT_CAPTCHA_LLM_MODEL=qwen3.7-flash
+SEAT_CAPTCHA_LLM_TIMEOUT_SECONDS=15
+SEAT_CAPTCHA_LLM_MAX_ATTEMPTS=2
 ```
 
 `SEAT_DRY_RUN=true` 是安全默认值，只做演练，不提交真实预约。确认网站流程和时间选择都正确后，才考虑改为 `false`。
 
 `SEAT_WECOM_WEBHOOK` 可选。配置后，实际预约的成功、明确失败或结果不明确会发送一条文本消息到企业微信；核验消息会附带当天捕捉到的预约信息。Webhook 属于敏感凭据，只保存在本机 `.env`，不要粘贴到聊天、日志或 Git 提交中；如果地址曾经暴露，应在企业微信后台删除旧机器人并重新生成。
 
+### 登录与验证码模型
+
+登录流程会先复用对应账号的持久化浏览器会话；会话失效时再填写账号和密码，并确认最终进入 `#/home`，不会把“仍停在登录页”当成成功。检测到验证码后，默认安全停止并报告原因。需要启用千问视觉兜底时，只在本机 `.env` 填写 `SEAT_CAPTCHA_LLM_API_KEY`，再将 `SEAT_CAPTCHA_LLM_ENABLED` 改为 `true`。当前预填模型为 `qwen3.7-flash`，兼容地址为 `https://dashscope.aliyuncs.com/compatible-mode/v1`。
+
+验证码图片只在内存中截图并发送给已配置的视觉接口，不保存图片、不写入日志；模型必须返回严格 JSON，算术验证码只接受 `0-20` 的结果，字母验证码只接受四位英文字母。请求超时、接口异常或答案格式不合规时，本次登录停止，不会快速重复提交。`SEAT_CAPTCHA_LLM_MAX_ATTEMPTS` 只能设置为 `1-3`，默认 `2`。
+
 本地验证通知链路时，可先保持 `SEAT_DRY_RUN=true`，填写新的 Webhook 后运行：
 
 ```powershell
-.\.venv\Scripts\python.exe -c "from seat_assistant.main import build_service; from seat_assistant.scheduler import run_once; s, service = build_service(); print(run_once(service, 'YYYY-MM-DD'))"
+.\.venv\Scripts\python.exe -c "from seat_assistant.main import build_service; from seat_assistant.scheduler import run_once; s, service = build_service('alice'); print(run_once(service, 'YYYY-MM-DD'))"
 ```
 
-该命令会执行本地 dry-run 预约并发送通知，不会向学校网站提交真实预约。将 `YYYY-MM-DD` 替换为需要演练的日期。
+该命令会执行指定账号的本地 dry-run 预约并发送通知，不会向学校网站提交真实预约。将 `alice` 和 `YYYY-MM-DD` 替换为实际账号 ID 和演练日期。单账号兼容模式可以省略账号参数：`build_service()`。
 
 ### 启动本地服务
 
@@ -171,6 +215,8 @@ SEAT_MAX_RESERVATIONS_PER_RUN=1
   --preferred 169 168 170
 ```
 
+使用 `accounts.json` 时，在命令中追加 `--account "alice"` 选择账号；未配置多账号时不要添加该参数，程序会继续使用 `.env` 的单账号会话。
+
 如需重新采集结束时间接口（不提交预约），运行：
 
 ```powershell
@@ -179,11 +225,13 @@ SEAT_MAX_RESERVATIONS_PER_RUN=1
   --date "YYYY-MM-DD"
 ```
 
+多账号采集时追加 `--account "alice"`，以使用该账号独立的浏览器会话。
+
 采集脚本会等待你在页面中点击一个空闲座位和开始时间，然后保存脱敏后的原生请求路径、查询参数名称、响应状态和结束时间选项到 `end-time-capture.json`。它不会点击“立即预约”。
 
 不带 `--submit` 时脚本只预览并停在“立即预约”前；加上 `--submit` 会直接提交。调试阶段如果希望保留人工护栏，可使用 `--submit --confirm-submit`，并在终端输入大写 `SUBMIT`。测试时应先确认页面实际显示的日期、开始时间、结束时间和座位号。
 
-使用 `--submit` 完成真实预约后，脚本会捕捉提交成功/失败页面提示，定位成功弹窗自身的关闭控件，并等待成功文字、外层容器和遮罩层全部隐藏后，再进入“我的预约”核验；如果阻塞层仍可见，程序会停止导航，避免卡住或发送误导通知。核验会合并当天历史和当前预约记录，只有完全匹配的 `RESERVE` 记录才判定成功，并发送企业微信通知。该弹窗关闭逻辑已通过本地回归测试，但真实网站仍需在登录会话有效时复核。登录自动化仍属于 v0.xx 的未闭环问题。若当天已有其他有效预约，会明确报告并停止；如果提交超时或预约接口迟迟没有匹配记录，也会发送结果不明确提醒。未加 `--submit` 的预览不会发送通知。
+使用 `--submit` 完成真实预约后，脚本会捕捉提交成功/失败页面提示，定位成功弹窗自身的关闭控件，并等待成功文字、外层容器和遮罩层全部隐藏后，再进入“我的预约”核验；如果阻塞层仍可见，程序会停止导航，避免卡住或发送误导通知。核验会合并当天历史和当前预约记录，只有完全匹配的 `RESERVE` 记录才判定成功，并发送企业微信通知。预约成功弹窗自动关闭和千问验证码登录都已经完成真实链路验证；定时器接入真实预约适配器仍属于 v0.xx 的未闭环问题。若当天已有其他有效预约，会明确报告并停止；如果提交超时或预约接口迟迟没有匹配记录，也会发送结果不明确提醒。未加 `--submit` 的预览不会发送通知。
 
 为减少不必要的取消和重新预约，脚本在进入阅览室前及点击“立即预约”前都会读取当天全部预约记录。请求 `15:30-17:00` 时，只要当天已有 `20:00-21:00` 等 `RESERVE` 预约，就会直接停止，不再进入选座和提交；取消、过期或无效状态的条目只会出现在当天记录报告中。
 
@@ -193,13 +241,17 @@ SEAT_MAX_RESERVATIONS_PER_RUN=1
 .\.venv\Scripts\python.exe scripts\calibrate.py
 ```
 
+多账号校准时追加 `--account "alice"`，不要让不同账号共用浏览器会话。
+
 校准脚本用于采集页面选择器和关键接口，不会提交预约或取消预约。按终端提示依次完成登录、进入座位预约首页、选择图书馆、进入阅览室、打开座位时间弹窗。生成的 `site-calibration.json` 可能包含站点结构和响应数据，不应上传到 GitHub。
 
 如果直接进入 `#/home`，说明浏览器持久化会话已经登录；如果停在 `#/login`，应先确认入口仍为 `/libseat/`，再检查本地会话或 `.env` 凭据。
 
 ## 7. 已知限制与风险
 
-当前最重要的未闭环问题是登录自动化：登录受 CAS 动态会话、跳转和验证码影响，尚未形成完整的登录状态机和会话续期机制。预约成功弹出层关闭已增加自定义容器、遮罩层等待和导航前守卫，并通过本地回归测试；因当前登录会话过期，尚未重新联网复核，未完成真实复核前不应无人值守开启真实预约。
+登录自动化已经完成真实页面验证：会话失效时可填写账号密码、截图验证码、调用千问并确认最终进入 `#/home`。本地 OCR 尚未接入，因此依赖外部模型配置；识别失败时仍会安全停止。多账号配置、独立会话、串行调度和每日成功额度已经落地；在真实预约适配器接入主服务前，仍不应无人值守开启真实预约。
+
+主服务的定时调度已支持多账号 dry-run 和配额控制；已验证的真实网站提交仍由 `scripts/preview_reservation.py` 执行。将该真实流程收敛为主服务适配器、再开启无人值守定时提交，是后续必须完成的工作。
 
 其他限制：
 
@@ -244,6 +296,13 @@ SEAT_MAX_RESERVATIONS_PER_RUN=1
 
 # 诊断登录与页面状态
 .\.venv\Scripts\python.exe scripts\diagnose_login.py
+# 多账号诊断：
+.\.venv\Scripts\python.exe scripts\diagnose_login.py alice
+
+# 只验证自动登录，不选择阅览室、座位或提交预约
+.\.venv\Scripts\python.exe scripts\test_login.py
+# 多账号登录验证：
+.\.venv\Scripts\python.exe scripts\test_login.py --account alice
 ```
 
 如果直接运行 `python -m pytest -q`，pytest 会把临时目录放在系统 Temp；当该目录存在残留或被其他 pytest 进程同时扫描时，可能在 `tmp_path` 初始化阶段报错。使用项目内的 `--basetemp .pytest-tmp` 可以绕开这类环境问题；这类报错不代表业务测试断言失败。
@@ -252,7 +311,7 @@ SEAT_MAX_RESERVATIONS_PER_RUN=1
 
 ## 10. 安全说明
 
-- `.env`、`.browser-profile`、`site-calibration.json`、`seat_assistant.db` 都属于本地敏感数据，不应提交到公共仓库。
+- `.env`、`accounts.json`、`.browser-profile`、`accounts/`、`site-calibration.json`、`seat_assistant.db` 都属于本地敏感数据，不应提交到公共仓库。
 - 不要在聊天、截图或日志中公开 CAS token、Cookie、账号密码。
 - 不要把 `8765` 端口直接映射到公网；需要远程访问时，应使用经过认证和加密的中继服务。
 - 自动化只能辅助预约，不能规避学校签到、暂离和黑名单规则。

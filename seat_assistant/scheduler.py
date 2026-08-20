@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import time
 
 
 def next_booking_time(now: datetime) -> datetime:
@@ -38,4 +39,18 @@ def run_once(service, day: str):
         elif not result.conclusive:
             stop_after_result = True
     service.repo.save_scheduler_run(day, "completed", results)
+    return results
+
+
+def run_accounts_once(services, day: str, interval_seconds: float = 15.0):
+    """Run account services serially, preserving each account's result."""
+    results = {}
+    for index, service in enumerate(services):
+        if index:
+            time.sleep(max(0.0, interval_seconds))
+        account_id = getattr(service, "account_id", None) or getattr(service.settings, "account_id", "default")
+        try:
+            results[account_id] = service.run_once(day)
+        except Exception as exc:
+            results[account_id] = {"status": "uncertain", "success": False, "message": f"账号运行异常：{exc}"}
     return results

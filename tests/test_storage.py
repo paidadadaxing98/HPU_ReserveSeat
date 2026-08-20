@@ -55,3 +55,24 @@ def test_repository_records_scheduler_run_and_events(tmp_path):
 
     repo.event("arrival", "morning", "09:05")
     assert repo.events("arrival", "morning") == ["09:05"]
+
+
+def test_repository_tracks_successes_per_account_and_date_idempotently(tmp_path):
+    alice = Repository(str(tmp_path / "alice.sqlite"), account_id="alice")
+    bob = Repository(str(tmp_path / "bob.sqlite"), account_id="bob")
+
+    assert alice.successful_booking_count("2026-08-21") == 0
+    assert alice.record_successful_booking("2026-08-21", "morning") is True
+    assert alice.record_successful_booking("2026-08-21", "morning") is False
+    assert alice.record_successful_booking("2026-08-21", "afternoon") is True
+    assert alice.successful_booking_count("2026-08-21") == 2
+    assert alice.successful_booking_count("2026-08-22") == 0
+    assert bob.successful_booking_count("2026-08-21") == 0
+
+
+def test_repository_success_count_does_not_include_failed_or_uncertain_records(tmp_path):
+    repo = Repository(str(tmp_path / "assistant.sqlite"), account_id="alice")
+    repo.save_reservation("2026-08-21", "morning", "failed", "09:00", "12:00")
+    repo.save_reservation("2026-08-21", "afternoon", "uncertain", "15:00", "17:00")
+
+    assert repo.successful_booking_count("2026-08-21") == 0

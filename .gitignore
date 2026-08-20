@@ -2,6 +2,8 @@
 .venv/
 *.egg-info/
 .browser-profile/
+accounts.json
+accounts/
 seat_assistant.db
 site-calibration.json
 end-time-capture.json

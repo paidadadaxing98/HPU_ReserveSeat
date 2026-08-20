@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import re
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,46 @@ def captcha_input_selectors() -> tuple[str, ...]:
         "input[placeholder*='验证码']",
         "input[aria-label*='验证码']",
     )
+
+
+def captcha_image_selectors() -> tuple[str, ...]:
+    return (
+        "img[src*='captcha']",
+        "img[src*='verify']",
+        "img[alt*='验证码']",
+        "img[title*='验证码']",
+        "canvas[aria-label*='验证码']",
+    )
+
+
+def classify_login_state(url: str, body_text: str, has_user_input: bool, has_password_input: bool, has_captcha_input: bool) -> str:
+    """Classify only observable page state; no credentials or token values are returned."""
+    if is_seat_app_url(url):
+        return "authenticated"
+    if has_user_input and has_password_input and has_captcha_input:
+        return "captcha"
+    if has_user_input and has_password_input:
+        return "form"
+    if login_failure_message(body_text):
+        return "failed"
+    return "unknown"
+
+
+def captcha_kind_from_text(text: str) -> str:
+    normalized = text or ""
+    if re.search(r"\d\s*[+＋-]\s*\d|加\s*法|减\s*法", normalized):
+        return "arithmetic"
+    if re.search(r"4\s*个\s*(英文字母|字母)|字母验证码", normalized, re.IGNORECASE):
+        return "letters"
+    return "auto"
+
+
+def login_failure_message(text: str) -> str:
+    normalized = " ".join((text or "").split())
+    for marker in ("验证码错误", "用户名或密码不正确", "账号或密码错误", "登录失败", "验证码不能为空"):
+        if marker in normalized:
+            return marker
+    return ""
 
 
 def api_auth_headers(headers: dict[str, str]) -> dict[str, str]:

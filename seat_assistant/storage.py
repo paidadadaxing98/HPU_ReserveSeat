@@ -1,16 +1,20 @@
 import json
 import sqlite3
 from statistics import median
+from pathlib import Path
 
 
 class Repository:
-    def __init__(self, path: str):
+    def __init__(self, path: str, account_id: str = "default"):
+        Path(path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, check_same_thread=False)
+        self.account_id = account_id
         self.db.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, kind TEXT, period TEXT, value TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
         self.db.execute("CREATE TABLE IF NOT EXISTS reservations (date TEXT, period TEXT, status TEXT, start TEXT, end TEXT, room TEXT, seat TEXT, message TEXT DEFAULT '', PRIMARY KEY(date, period))")
         self.db.execute("CREATE TABLE IF NOT EXISTS defaults (period TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS commands (request_id TEXT PRIMARY KEY, text TEXT NOT NULL, response TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
         self.db.execute("CREATE TABLE IF NOT EXISTS scheduler_runs (date TEXT PRIMARY KEY, status TEXT NOT NULL, summary TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS successful_bookings (date TEXT NOT NULL, account_id TEXT NOT NULL, reservation_key TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(date, account_id, reservation_key))")
         self._ensure_column("reservations", "message", "TEXT DEFAULT ''")
         self.db.commit()
 
@@ -99,6 +103,21 @@ class Repository:
             (date, status, json.dumps(summary, ensure_ascii=False)),
         )
         self.db.commit()
+
+    def record_successful_booking(self, date: str, reservation_key: str) -> bool:
+        cursor = self.db.execute(
+            "INSERT OR IGNORE INTO successful_bookings(date, account_id, reservation_key) VALUES (?, ?, ?)",
+            (date, self.account_id, reservation_key),
+        )
+        self.db.commit()
+        return cursor.rowcount == 1
+
+    def successful_booking_count(self, date: str) -> int:
+        row = self.db.execute(
+            "SELECT COUNT(*) FROM successful_bookings WHERE date=? AND account_id=?",
+            (date, self.account_id),
+        ).fetchone()
+        return int(row[0])
 
 
 def _to_minutes(value: str) -> int:

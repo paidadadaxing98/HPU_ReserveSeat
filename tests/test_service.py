@@ -31,8 +31,8 @@ def test_reserve_period_does_not_submit_again_after_success(tmp_path):
     adapter = FakeAdapter()
     service, repo = make_service(tmp_path, adapter)
 
-    first = service.reserve_period("2026-08-21", "morning")
-    second = service.reserve_period("2026-08-21", "morning")
+    first = service.reserve_period("2026-08-21", "morning", quota_day="2026-08-21")
+    second = service.reserve_period("2026-08-21", "morning", quota_day="2026-08-21")
 
     assert first.success and second.success
     assert len(adapter.reserve_calls) == 1
@@ -172,3 +172,60 @@ def test_notification_failure_does_not_change_reservation_result(tmp_path):
 
     assert result.success is True
     assert repo.get_reservation("2026-08-21", "morning")["status"] == "reserved"
+
+
+def test_new_success_counts_once_but_reusing_existing_booking_does_not(tmp_path):
+    adapter = FakeAdapter()
+    repo = Repository(str(tmp_path / "db.sqlite"), account_id="alice")
+    service = AssistantService(Settings(control_token="local-token"), repo, adapter)
+
+    first = service.reserve_period("2026-08-21", "morning", quota_day="2026-08-21")
+    second = service.reserve_period("2026-08-21", "morning", quota_day="2026-08-21")
+
+    assert first.success is True
+    assert second.message == "已存在预约"
+    assert repo.successful_booking_count("2026-08-21") == 1
+
+
+def test_failed_and_uncertain_results_do_not_consume_success_quota(tmp_path):
+    class FailingAdapter(FakeAdapter):
+        def reserve(self, date, period, start, end):
+            return SeatResult(False, message="failed")
+
+    repo = Repository(str(tmp_path / "db.sqlite"), account_id="alice")
+    service = AssistantService(Settings(control_token="local-token"), repo, FailingAdapter())
+
+    result = service.reserve_period("2026-08-21", "morning", quota_day="2026-08-21")
+
+    assert result.success is False
+    assert repo.successful_booking_count("2026-08-21") == 0
+
+
+def test_fourth_success_is_skipped_after_three_successes(tmp_path):
+    adapter = FakeAdapter()
+    repo = Repository(str(tmp_path / "db.sqlite"), account_id="alice")
+    settings = Settings(control_token="local-token", daily_success_limit=3)
+    service = AssistantService(settings, repo, adapter)
+    for period in ("morning", "afternoon", "evening"):
+        assert repo.record_successful_booking("2026-08-21", period) is True
+
+    result = service.reserve_period("2026-08-22", "morning", quota_day="2026-08-21")
+
+    assert result.success is False
+    assert result.conclusive is True
+    assert "成功预约次数已达到" in result.message
+
+
+def test_reusing_existing_booking_is_allowed_when_success_quota_is_full(tmp_path):
+    adapter = FakeAdapter()
+    repo = Repository(str(tmp_path / "db.sqlite"), account_id="alice")
+    settings = Settings(control_token="local-token", daily_success_limit=1)
+    service = AssistantService(settings, repo, adapter)
+    first = service.reserve_period("2026-08-21", "morning", quota_day="2026-08-21")
+    assert first.success is True
+
+    reused = service.reserve_period("2026-08-21", "morning", quota_day="2026-08-21")
+
+    assert reused.success is True
+    assert reused.message == "已存在预约"
+    assert len(adapter.reserve_calls) == 1

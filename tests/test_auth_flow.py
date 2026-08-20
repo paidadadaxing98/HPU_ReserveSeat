@@ -1,5 +1,6 @@
 import seat_assistant.auth_flow as auth_flow
-from seat_assistant.auth_flow import api_auth_headers, auth_header_names, browser_api_headers, captcha_input_selectors, credentials_available, is_seat_app_url, is_cas_url, library_selected, normalize_library
+from seat_assistant.auth_flow import api_auth_headers, auth_header_names, browser_api_headers, captcha_image_selectors, captcha_input_selectors, captcha_kind_from_text, classify_login_state, credentials_available, is_seat_app_url, is_cas_url, library_selected, login_failure_message, normalize_library
+from seat_assistant.config import load_account_settings
 from scripts.preview_reservation import record_api_auth, request_token
 
 
@@ -27,6 +28,26 @@ def test_captcha_selectors_cover_common_cas_fields():
     selectors = captcha_input_selectors()
     assert "input[name='captcha']" in selectors
     assert "input[placeholder*='验证码']" in selectors
+    assert "img[src*='captcha']" in captcha_image_selectors()
+
+
+def test_classify_login_state_distinguishes_authenticated_form_captcha_and_unknown():
+    assert classify_login_state("https://seatlib.hpu.edu.cn/libseat/#/home", "", False, False, False) == "authenticated"
+    assert classify_login_state("https://uia.hpu.edu.cn/cas/login", "", True, True, False) == "form"
+    assert classify_login_state("https://uia.hpu.edu.cn/cas/login", "", True, True, True) == "captcha"
+    assert classify_login_state("https://example.test/", "", False, False, False) == "unknown"
+
+
+def test_captcha_kind_detection_prefers_arithmetic_or_letters_and_defaults_to_auto():
+    assert captcha_kind_from_text("验证码：12+5=") == "arithmetic"
+    assert captcha_kind_from_text("请输入图片中的4个字母") == "letters"
+    assert captcha_kind_from_text("请输入验证码") == "auto"
+
+
+def test_login_failure_message_extracts_safe_user_facing_reason():
+    assert login_failure_message("提示：验证码错误，请重新输入") == "验证码错误"
+    assert login_failure_message("用户名或密码不正确") == "用户名或密码不正确"
+    assert login_failure_message("欢迎登录") == ""
 
 
 def test_api_auth_headers_keep_credentials_but_drop_transport_headers():
@@ -105,3 +126,29 @@ def test_record_api_auth_keeps_only_replayable_rest_authentication():
     unchanged = dict(state)
     record_api_auth(state, "https://seatlib.hpu.edu.cn/static/app.js?token=wrong", {"Authorization": "wrong"})
     assert state == unchanged
+
+
+def test_account_settings_resolves_isolated_profile_and_database(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "accounts.json").write_text(
+        '{"accounts":[{"id":"alice","account":"1001","password":"secret"}]}',
+        encoding="utf-8",
+    )
+
+    settings = load_account_settings("alice")
+
+    assert settings.account_id == "alice"
+    assert settings.profile_path == str((tmp_path / "accounts" / "alice" / "browser-profile").resolve())
+    assert settings.db_path == str((tmp_path / "accounts" / "alice" / "seat_assistant.db").resolve())
+
+
+def test_account_settings_rejects_unknown_id_without_fallback(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "accounts.json").write_text(
+        '{"accounts":[{"id":"alice","account":"1001","password":"secret"}]}',
+        encoding="utf-8",
+    )
+
+    import pytest
+    with pytest.raises(ValueError, match="未找到账号"):
+        load_account_settings("unknown")

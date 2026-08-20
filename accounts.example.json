@@ -1,0 +1,10 @@
+{
+  "accounts": [
+    {
+      "id": "my-account",
+      "account": "你的统一认证账号",
+      "password": "你的统一认证密码",
+      "wecom_webhook": ""
+    }
+  ]
+}

@@ -5,7 +5,8 @@ from seat_assistant.reservation import SeatResult
 from seat_assistant.scheduler import run_once
 from seat_assistant.service import AssistantService
 from seat_assistant.storage import Repository
-from seat_assistant.scheduler import next_booking_time
+from seat_assistant.scheduler import next_booking_time, run_accounts_once
+from seat_assistant.config import AccountSettings
 
 
 class SchedulerAdapter:
@@ -65,3 +66,24 @@ def test_run_once_stops_after_one_successful_period_when_account_allows_one_book
     assert result["morning"]["status"] == "reserved"
     assert result["afternoon"]["status"] == "skipped"
     assert result["evening"]["status"] == "skipped"
+
+
+def test_run_accounts_once_runs_accounts_in_order_and_keeps_results_separate(tmp_path):
+    calls = []
+
+    class AccountService:
+        def __init__(self, account_id):
+            self.account_id = account_id
+
+        def run_once(self, day):
+            calls.append(self.account_id)
+            return {"status": "reserved", "account_id": self.account_id}
+
+    services = [AccountService("alice"), AccountService("bob")]
+    result = run_accounts_once(services, "2026-08-21", interval_seconds=0)
+
+    assert calls == ["alice", "bob"]
+    assert result == {
+        "alice": {"status": "reserved", "account_id": "alice"},
+        "bob": {"status": "reserved", "account_id": "bob"},
+    }

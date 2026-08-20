@@ -5,6 +5,8 @@ import json
 import os
 import re
 import sys
+import uuid
+from datetime import date
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 from playwright.async_api import async_playwright
@@ -13,8 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from seat_assistant.calibration import sanitize_url
-from seat_assistant.auth_flow import auth_header_names, browser_api_headers, captcha_input_selectors, credentials_available, is_seat_app_url, library_selected, normalize_library
-from seat_assistant.config import _load_dotenv
+from seat_assistant.account_lock import AccountLock
+from seat_assistant.auth_flow import auth_header_names, browser_api_headers, captcha_image_selectors, captcha_input_selectors, captcha_kind_from_text, credentials_available, is_seat_app_url, library_selected, login_failure_message, normalize_library
+from seat_assistant.captcha_llm import CaptchaVisionError, QwenCaptchaClient
+from seat_assistant.config import _load_dotenv, load_account_settings
 from seat_assistant.date_selection import date_option_matches, normalize_date
 from seat_assistant.end_times import parse_native_end_times
 from seat_assistant.booking_window import validate_booking_date
@@ -22,6 +26,7 @@ from seat_assistant.notifications import WeComNotifier, send_reservation_notific
 from seat_assistant.preview import layout_from_response, layout_request_matches, normalize_room_name, preview_seat_candidates
 from seat_assistant.reservation import SeatResult
 from seat_assistant.seat_inventory import seats_from_layout
+from seat_assistant.storage import Repository
 from seat_assistant.submission import active_reservations_for_day, confirmation_required, day_reservations, end_time_response_matches_start, find_matching_reservation, find_similar_reservation, history_page_records, normalize_time_option, requested_times_available, reservation_matches, submission_settled, time_option_id, time_values, validate_half_hour_time
 
 SITE_URL = os.getenv("SEAT_LOGIN_URL", "https://seatlib.hpu.edu.cn/libseat/")
@@ -29,14 +34,49 @@ CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 PROFILE = Path(".browser-profile").resolve()
 
 
+class LockedBrowser:
+    def __init__(self, profile: Path):
+        self.profile = profile
+        self.lock = AccountLock(profile.parent / "account.lock")
+        self.playwright = None
+        self.context = None
+
+    async def __aenter__(self):
+        self.lock.__enter__()
+        try:
+            self.playwright = await async_playwright().start()
+            self.context = await self.playwright.chromium.launch_persistent_context(
+                str(self.profile), executable_path=CHROME, headless=False,
+                viewport={"width": 1440, "height": 900}
+            )
+            return self.context
+        except Exception:
+            self.lock.__exit__(*sys.exc_info())
+            if self.playwright is not None:
+                await self.playwright.stop()
+            raise
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        try:
+            if self.context is not None:
+                await self.context.close()
+            if self.playwright is not None:
+                await self.playwright.stop()
+        finally:
+            self.lock.__exit__(exc_type, exc_value, traceback)
+        return False
+
+
 async def main(args):
     _load_dotenv()
-    notifier = WeComNotifier(os.getenv("SEAT_WECOM_WEBHOOK", ""))
+    account_settings = load_account_settings(args.account)
+    profile = Path(account_settings.profile_path)
+    repository = Repository(str(account_settings.db_path), account_settings.id)
+    notifier = WeComNotifier(account_settings.wecom_webhook)
     validate_booking_date(args.date, __import__('datetime').datetime.now())
     args.start = validate_half_hour_time(args.start)
     args.end = validate_half_hour_time(args.end)
-    async with async_playwright() as p:
-        context = await p.chromium.launch_persistent_context(str(PROFILE), executable_path=CHROME, headless=False, viewport={"width": 1440, "height": 900})
+    async with LockedBrowser(profile) as context:
         page = context.pages[0] if context.pages else await context.new_page()
         api_auth = {"headers": {}, "token": ""}
         capture_tasks = set()
@@ -48,7 +88,7 @@ async def main(args):
 
         page.on("request", capture_request)
         try:
-            await page.goto(os.getenv("SEAT_LOGIN_URL", SITE_URL), wait_until="domcontentloaded")
+            await page.goto(account_settings.login_url, wait_until="domcontentloaded")
             # The seat app may briefly render #/login while its SSO redirect
             # exchanges the ticket and adds the authenticated token.
             if not is_seat_app_url(page.url) and "#/login" in page.url:
@@ -56,12 +96,12 @@ async def main(args):
                     await page.wait_for_url("**/libseat/**#/home", timeout=15000)
                 except Exception:
                     pass
-            logged_in = await login_if_configured(page)
+            logged_in = await login_if_configured(page, account_settings)
             if not logged_in:
                 if "#/login" in page.url:
                     print("当前是座位系统登录状态失效，正在重新打开统一认证入口……")
-                    await page.goto(os.getenv("SEAT_LOGIN_URL", SITE_URL), wait_until="domcontentloaded")
-                    logged_in = await login_if_configured(page)
+                    await page.goto(account_settings.login_url, wait_until="domcontentloaded")
+                    logged_in = await login_if_configured(page, account_settings)
                 if not logged_in:
                     print("第 1 步（手动）：请完成登录，直到进入‘自选座位’首页。")
                     input("登录完成后按回车：")
@@ -77,6 +117,11 @@ async def main(args):
             if active_today:
                 details = "；".join(reservation_summary(item) for item in active_today)
                 print(f"当天已经存在有效预约，学校限制一次只能预约一个时间段，跳过本次预约：{details}")
+                await context.close()
+                return
+            quota_day = date.today().isoformat()
+            if repository.successful_booking_count(quota_day) >= account_settings.daily_success_limit:
+                print(f"账号 {account_settings.id} 今日已完成 {account_settings.daily_success_limit} 次成功预约，停止本次提交。")
                 await context.close()
                 return
             similar = find_similar_reservation(existing, args.date, args.room, args.start, args.end)
@@ -221,6 +266,7 @@ async def main(args):
             page, api_auth, args.date, args.room, selected.number, args.start, args.end, submission_signal=submission_signal
         )
         if verification_status == "success":
+            repository.record_successful_booking(date.today().isoformat(), f"{args.date}:{selected.number}:{uuid.uuid4().hex}")
             print(f"核验成功：{args.date}，{args.room}，座位 {selected.number}，{args.start}-{args.end}")
             send_preview_notification(
                 notifier,
@@ -332,30 +378,25 @@ async def wait_for_reservation_confirmation(
     return "uncertain", None, last_error or "提交后未在我的预约历史中找到完全匹配记录"
 
 
-async def login_if_configured(page):
-    account = os.getenv("SEAT_ACCOUNT", "").strip()
-    password = os.getenv("SEAT_PASSWORD", "").strip()
+async def login_if_configured(page, settings=None):
+    account = (settings.account if settings is not None else os.getenv("SEAT_ACCOUNT", "")).strip()
+    password = (settings.password if settings is not None else os.getenv("SEAT_PASSWORD", "")).strip()
     if not credentials_available(account, password):
-        print("SEAT_ACCOUNT/SEAT_PASSWORD 为空，将复用浏览器会话；若未登录请先手动登录。")
+        print("账号凭据为空，将复用浏览器会话；若未登录请先手动登录。")
         return False
     if is_seat_app_url(page.url):
-        print("浏览器会话已经登录，跳过账号密码填写。")
+        print(f"账号 {getattr(settings, 'account_id', 'default')} 浏览器会话已经登录，跳过账号密码填写。")
         return True
     if "#/login" in page.url:
         try:
-            await page.wait_for_url("**/libseat/**#/home", timeout=15000)
+            await wait_for_authenticated_page(page, timeout_ms=15000)
             print("座位系统已通过现有会话登录，跳过账号密码填写。")
             return True
         except Exception:
             pass
     print("检测到本地凭据，正在自动填写统一身份认证。")
     captcha = page.locator(", ".join(captcha_input_selectors())).first
-    if await captcha.count() and await captcha.is_visible():
-        print("检测到登录验证码，请在浏览器中完成验证码和登录。")
-        input("登录成功并进入座位预约首页后按回车：")
-        if not is_seat_app_url(page.url):
-            await page.wait_for_url("**/libseat/**", timeout=30000)
-        return True
+    captcha_visible = await captcha.count() > 0 and await captcha.is_visible()
     user = page.locator("input[name='username'], input[name='userName'], input[placeholder*='账号'], input[placeholder*='用户名']").first
     pwd = page.locator("input[type='password'], input[name='password']").first
     if await user.count() == 0 or await pwd.count() == 0:
@@ -363,17 +404,65 @@ async def login_if_configured(page):
     await user.fill(account)
     await pwd.fill(password)
     captcha = page.locator(", ".join(captcha_input_selectors())).first
-    if await captcha.count() and await captcha.is_visible():
-        print("检测到登录验证码。账号密码已填写，请在浏览器中输入图片验证码并点击登录。")
-        input("完成验证码并进入座位预约首页后按回车：")
-        await page.wait_for_url("**/libseat/**", timeout=30000)
-        return True
+    captcha_visible = await captcha.count() > 0 and await captcha.is_visible()
+    if captcha_visible:
+        answer = await solve_captcha_if_configured(page, settings, captcha)
+        if answer is None:
+            raise RuntimeError("检测到登录验证码，但本地识别和已配置的视觉模型都未给出可验证答案；为避免盲目提交，本次登录已停止。")
+        await captcha.fill(answer)
     submit = page.locator("button[type='submit'], input[type='submit'], button:has-text('登录'), input[value*='登录']").first
     if await submit.count() == 0:
         raise RuntimeError("未找到登录按钮，请清空凭据后手动登录。")
     await submit.click()
-    await page.wait_for_url("**/libseat/**", timeout=30000)
+    try:
+        await wait_for_authenticated_page(page, timeout_ms=30000)
+    except Exception as exc:
+        body_text = await page.locator("body").inner_text()
+        reason = login_failure_message(body_text)
+        if reason:
+            raise RuntimeError(f"登录失败：{reason}") from exc
+        raise RuntimeError("登录后未确认进入座位预约首页") from exc
     return True
+
+
+async def wait_for_authenticated_page(page, timeout_ms: int = 30000):
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    while asyncio.get_running_loop().time() < deadline:
+        if is_seat_app_url(page.url):
+            return
+        await page.wait_for_timeout(500)
+    raise RuntimeError(f"登录跳转超时，当前页面：{sanitize_url(page.url)}")
+
+
+async def solve_captcha_if_configured(page, settings, captcha_input):
+    if settings is None or not getattr(settings, "captcha_llm_enabled", False):
+        print("检测到登录验证码，但验证码模型未启用。")
+        return None
+    image_locator = page.locator(", ".join(captcha_image_selectors())).first
+    if await image_locator.count() == 0 or not await image_locator.is_visible():
+        print("检测到验证码输入框，但未找到可截图的验证码图片。")
+        return None
+    image_bytes = await image_locator.screenshot(type="png")
+    prompt_text = await page.locator("body").inner_text()
+    kind = captcha_kind_from_text(prompt_text)
+    if kind == "auto":
+        print("验证码类型不明确，交给视觉模型判断并进行严格格式校验。")
+    client = QwenCaptchaClient(
+        settings.captcha_llm_api_key,
+        settings.captcha_llm_base_url,
+        settings.captcha_llm_model,
+        settings.captcha_llm_timeout_seconds,
+    )
+    for attempt in range(1, settings.captcha_llm_max_attempts + 1):
+        try:
+            answer = client.solve(image_bytes, "image/png", kind)
+            print(f"验证码视觉识别得到合规答案（第 {attempt} 次），准备提交登录。")
+            return answer
+        except CaptchaVisionError as exc:
+            print(f"验证码视觉识别第 {attempt} 次未通过：{exc}")
+            if attempt < settings.captcha_llm_max_attempts:
+                await page.wait_for_timeout(2500)
+    return None
 
 
 def request_token(url: str) -> str:
@@ -871,6 +960,7 @@ def _looks_selected_blue(background, color):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--account", default=None, help="多账号配置中的账号 ID；未指定时使用 default")
     parser.add_argument("--room", required=True)
     parser.add_argument("--room-id", type=int, help="可选，仅用于核对；实际 ID 从网页请求读取")
     parser.add_argument("--date", required=True)
