@@ -123,19 +123,21 @@ Invoke-RestMethod http://127.0.0.1:8765/api/v1/commands -Method Post -Headers $h
 
 ### 多账号配置
 
-不创建 `accounts.json` 时，程序继续兼容现有的 `SEAT_ACCOUNT`、`SEAT_PASSWORD` 和 `.browser-profile` 单账号模式。需要管理多个账号时，复制 `accounts.example.json` 为本地 `accounts.json`，每个账号填写唯一的 `id`、校园账号和密码：
+不创建 `accounts.json` 时，程序继续兼容现有的 `SEAT_ACCOUNT`、`SEAT_PASSWORD` 和 `.browser-profile` 单账号模式。需要管理多个账号时，复制 `accounts.example.json` 为本地 `accounts.json`，每个账号填写唯一的 `id`、校园账号和密码。可以预先保留最多 20 个账号对象；空白占位项设置 `enabled: false`，填入账号和密码后再改为 `enabled: true`：
 
 ```json
 {
   "accounts": [
     {
       "id": "alice",
+      "enabled": true,
       "account": "统一认证账号A",
       "password": "密码A",
       "wecom_webhook": ""
     },
     {
       "id": "bob",
+      "enabled": true,
       "account": "统一认证账号B",
       "password": "密码B",
       "wecom_webhook": ""
@@ -143,6 +145,8 @@ Invoke-RestMethod http://127.0.0.1:8765/api/v1/commands -Method Post -Headers $h
   ]
 }
 ```
+
+未启用的占位项必须保持 `account` 和 `password` 都为空，例如：`{"id":"account03","enabled":false,"account":"","password":""}`。程序只加载 `enabled: true` 的账号；至少需要一个已启用账号。启用账号后，程序会自动为其创建独立的浏览器会话和数据库目录。
 
 每个账号的浏览器会话和数据库默认分别放在 `accounts/<id>/browser-profile`、`accounts/<id>/seat_assistant.db`。账号配置最多 20 个，账号 ID 和校园账号不能重复。`accounts.json`、`accounts/` 和其中的密码、Cookie、数据库均已加入 Git 忽略。
 

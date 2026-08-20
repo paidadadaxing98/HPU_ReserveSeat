@@ -149,6 +149,18 @@ def test_load_accounts_rejects_blank_credentials(monkeypatch, tmp_path):
         load_accounts()
 
 
+def test_load_accounts_skips_disabled_blank_reservations(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "accounts.json").write_text(json.dumps({"accounts": [
+        {"id": "account01", "account": "1001", "password": "secret", "enabled": True},
+        {"id": "account02", "account": "", "password": "", "enabled": False},
+    ]}), encoding="utf-8")
+
+    accounts = load_accounts()
+
+    assert [item.id for item in accounts] == ["account01"]
+
+
 def test_load_accounts_rejects_empty_json_account_list(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "accounts.json").write_text('{"accounts": []}', encoding="utf-8")

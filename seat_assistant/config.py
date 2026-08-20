@@ -121,14 +121,26 @@ def load_accounts(path: str | None = None) -> list[AccountSettings]:
         account_id = str(entry.get("id", "")).strip()
         account = str(entry.get("account", "")).strip()
         password = str(entry.get("password", "")).strip()
-        if not account_id or not account or not password:
+        enabled = entry.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError(f"账号 {account_id or '<空>'} 的 enabled 必须是 true 或 false")
+        if not account_id:
+            raise ValueError("账号 ID 不能为空")
+        if account_id in {".", ".."} or Path(account_id).name != account_id:
+            raise ValueError(f"账号 ID 不是安全目录名：{account_id}")
+        if not enabled:
+            if account or password:
+                raise ValueError(f"未启用账号 {account_id} 的账号和密码必须同时为空")
+            if account_id in ids:
+                raise ValueError(f"账号 ID 重复：{account_id}")
+            ids.add(account_id)
+            continue
+        if not account or not password:
             raise ValueError("账号 ID、账号和密码不能为空")
         if account_id in ids:
             raise ValueError(f"账号 ID 重复：{account_id}")
         if account in credentials:
             raise ValueError(f"学号重复：{account}")
-        if account_id in {".", ".."} or Path(account_id).name != account_id:
-            raise ValueError(f"账号 ID 不是安全目录名：{account_id}")
         ids.add(account_id)
         credentials.add(account)
         profile = Path(entry.get("profile_path") or root / "accounts" / account_id / "browser-profile")

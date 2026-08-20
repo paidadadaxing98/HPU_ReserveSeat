@@ -71,7 +71,7 @@ async def main(args):
     _load_dotenv()
     account_settings = load_account_settings(args.account)
     profile = Path(account_settings.profile_path)
-    repository = Repository(str(account_settings.db_path), account_settings.id)
+    repository = Repository(str(account_settings.db_path), account_settings.account_id)
     notifier = WeComNotifier(account_settings.wecom_webhook)
     validate_booking_date(args.date, __import__('datetime').datetime.now())
     args.start = validate_half_hour_time(args.start)
@@ -121,7 +121,7 @@ async def main(args):
                 return
             quota_day = date.today().isoformat()
             if repository.successful_booking_count(quota_day) >= account_settings.daily_success_limit:
-                print(f"账号 {account_settings.id} 今日已完成 {account_settings.daily_success_limit} 次成功预约，停止本次提交。")
+                print(f"账号 {account_settings.account_id} 今日已完成 {account_settings.daily_success_limit} 次成功预约，停止本次提交。")
                 await context.close()
                 return
             similar = find_similar_reservation(existing, args.date, args.room, args.start, args.end)
