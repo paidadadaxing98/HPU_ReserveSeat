@@ -1,0 +1,25 @@
+from datetime import datetime, timedelta
+
+
+def next_booking_time(now: datetime) -> datetime:
+    target = now.replace(hour=19, minute=30, second=0, microsecond=0)
+    return target if now <= target else target + timedelta(days=1)
+
+
+def run_once(service, day: str):
+    previous = service.repo.scheduler_run(day)
+    if previous and previous["status"] == "completed":
+        return previous["summary"]
+
+    results = {}
+    for period in service.settings.periods:
+        result = service.reserve_period(day, period)
+        results[period] = {
+            "status": "reserved" if result.success else "uncertain" if not result.conclusive else "failed",
+            "success": result.success,
+            "message": result.message,
+            "room": result.room,
+            "seat": result.seat,
+        }
+    service.repo.save_scheduler_run(day, "completed", results)
+    return results

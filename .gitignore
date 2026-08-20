@@ -1,0 +1,10 @@
+.env
+.venv/
+*.egg-info/
+.browser-profile/
+seat_assistant.db
+site-calibration.json
+end-time-capture.json
+site-inspection.json
+__pycache__/
+.pytest_cache/
