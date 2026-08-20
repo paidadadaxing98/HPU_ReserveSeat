@@ -29,6 +29,109 @@ def reservation_matches(text: str, day: str, room: str, seat: str, start: str, e
     return all(value in normalized for value in (day, room, seat, start, end))
 
 
+def find_matching_reservation(
+    reservations: list[dict],
+    day: str,
+    room: str,
+    seat: str,
+    start: str,
+    end: str,
+) -> dict | None:
+    """Find an active history record that confirms one submitted booking."""
+    requested_start = _clock_minutes(start)
+    requested_end = _clock_minutes(end)
+    if requested_start is None or requested_end is None or requested_end <= requested_start:
+        return None
+    requested_room = _normalize_room(room)
+    requested_seat = _normalize_seat(seat)
+    for item in reservations or []:
+        if not isinstance(item, dict) or _extract_date(item) != day or not _is_active_reservation(item):
+            continue
+        existing_room = _extract_room(item)
+        if existing_room and requested_room and not _room_matches(existing_room, requested_room):
+            continue
+        if not _seats_match(_extract_seat(item), requested_seat):
+            continue
+        existing_start = _extract_time(item, ("startTime", "start_time", "start", "beginTime", "begin"))
+        existing_end = _extract_time(item, ("endTime", "end_time", "end", "finishTime", "finish"))
+        if existing_start == requested_start and existing_end == requested_end:
+            return item
+    return None
+
+
+def active_reservations_for_day(reservations: list[dict], day: str) -> list[dict]:
+    """Return all active reservations for a day, regardless of requested time."""
+    return [
+        item for item in reservations or []
+        if isinstance(item, dict) and _extract_date(item) == day and _is_active_reservation(item)
+    ]
+
+
+def day_reservations(reservations: list[dict], day: str) -> list[dict]:
+    """Return every history record for a day, including inactive statuses."""
+    return [
+        item for item in reservations or []
+        if isinstance(item, dict) and _extract_date(item) == day
+    ]
+
+
+def history_page_records(body: dict) -> tuple[list[dict], int | None]:
+    """Extract history rows and the optional total from the site's page payload.
+
+    The history endpoint has returned both ``data.records`` and an additional
+    ``data.data.records`` wrapper across deployments.  Keep the transport
+    parser tolerant of those wrappers while only accepting known row keys.
+    """
+    if not isinstance(body, dict):
+        return [], None
+
+    queue = [body.get("data", body)]
+    seen: set[int] = set()
+    total = None
+    while queue:
+        node = queue.pop(0)
+        if isinstance(node, list):
+            rows = [item for item in node if isinstance(item, dict)]
+            if rows and len(rows) == len(node):
+                return rows, total
+            queue.extend(item for item in node if isinstance(item, (dict, list)))
+            continue
+        if not isinstance(node, dict) or id(node) in seen:
+            continue
+        seen.add(id(node))
+
+        if total is None:
+            for key in ("count", "total", "totalCount", "recordsTotal", "rowCount"):
+                if key not in node or node[key] is None:
+                    continue
+                try:
+                    total = int(node[key])
+                except (TypeError, ValueError):
+                    pass
+                if total is not None:
+                    break
+
+        if _looks_like_reservation_record(node):
+            return [node], total
+
+        for key in (
+            "records", "reservations", "rows", "list", "items", "content",
+            "data", "result", "pageData", "dataList", "history", "reservationList",
+        ):
+            value = node.get(key)
+            if isinstance(value, (dict, list)):
+                queue.append(value)
+    return [], total
+
+
+def _looks_like_reservation_record(value: dict) -> bool:
+    return any(key in value for key in (
+        "date", "day", "onDate", "reservationDate", "reserveDate",
+        "begin", "beginTime", "start", "startTime", "end", "endTime",
+        "loc", "location", "seatNumber", "seatNo", "stat", "status",
+    ))
+
+
 def submission_settled(text: str) -> bool:
     return "正在玩命预约中" not in text and "玩命预约" not in text
 
@@ -68,7 +171,12 @@ def find_similar_reservation(
 
 def _is_active_reservation(item: dict) -> bool:
     """Only reuse records whose API status explicitly says they are active."""
-    for key in ("status", "state", "reservationStatus", "reserveStatus", "bookingStatus"):
+    if "stat" in item:
+        value = item.get("stat")
+        if isinstance(value, dict):
+            value = value.get("code") or value.get("name") or value.get("value") or value.get("status")
+        return _value_text(value).strip().upper() == "RESERVE"
+    for key in ("stat", "status", "state", "reservationStatus", "reserveStatus", "bookingStatus"):
         if key not in item:
             continue
         value = item.get(key)
@@ -94,7 +202,7 @@ def _extract_date(item: dict) -> str | None:
 
 
 def _extract_room(item: dict) -> str:
-    for key in ("roomName", "room_name", "readingRoomName", "room", "readingRoom", "location"):
+    for key in ("roomName", "room_name", "readingRoomName", "room", "readingRoom", "location", "loc"):
         value = item.get(key)
         if isinstance(value, dict):
             value = value.get("name") or value.get("title") or value.get("text")
@@ -102,6 +210,33 @@ def _extract_room(item: dict) -> str:
         if normalized:
             return normalized
     return ""
+
+
+def _extract_seat(item: dict) -> str:
+    for key in ("seatNumber", "seatNo", "seat", "seatName", "number"):
+        value = item.get(key)
+        if isinstance(value, dict):
+            value = value.get("number") or value.get("name") or value.get("text")
+        normalized = _normalize_seat(_value_text(value))
+        if normalized:
+            return normalized
+    for key in ("location", "loc"):
+        match = re.search(r"(?:座位号|座位|seat)\s*([0-9A-Za-z-]+)", _value_text(item.get(key)), re.IGNORECASE)
+        if match:
+            return _normalize_seat(match.group(1))
+    return ""
+
+
+def _normalize_seat(value: str) -> str:
+    return "".join(_value_text(value).split()).upper()
+
+
+def _seats_match(existing: str, requested: str) -> bool:
+    if not existing or not requested:
+        return False
+    if existing == requested:
+        return True
+    return existing.isdigit() and requested.isdigit() and int(existing) == int(requested)
 
 
 def _room_matches(existing: str, requested: str) -> bool:

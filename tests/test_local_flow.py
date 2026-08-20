@@ -24,4 +24,4 @@ def test_local_flow_persists_booking_delay_and_cancellation(tmp_path):
 
     cancelled = service.apply_command(Command("cancel", "afternoon"), "2026-08-21")
     assert cancelled["ok"] is True
-    assert repo.get_reservation("2026-08-21", "afternoon")["status"] == "cancelled"
+    assert repo.get_reservation("2026-08-21", "afternoon") is None

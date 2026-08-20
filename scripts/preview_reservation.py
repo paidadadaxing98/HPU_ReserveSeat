@@ -22,7 +22,7 @@ from seat_assistant.notifications import WeComNotifier, send_reservation_notific
 from seat_assistant.preview import layout_from_response, layout_request_matches, normalize_room_name, preview_seat_candidates
 from seat_assistant.reservation import SeatResult
 from seat_assistant.seat_inventory import seats_from_layout
-from seat_assistant.submission import confirmation_required, end_time_response_matches_start, find_similar_reservation, normalize_time_option, requested_times_available, reservation_matches, submission_settled, time_option_id, time_values, validate_half_hour_time
+from seat_assistant.submission import active_reservations_for_day, confirmation_required, day_reservations, end_time_response_matches_start, find_matching_reservation, find_similar_reservation, history_page_records, normalize_time_option, requested_times_available, reservation_matches, submission_settled, time_option_id, time_values, validate_half_hour_time
 
 SITE_URL = os.getenv("SEAT_LOGIN_URL", "https://seatlib.hpu.edu.cn/libseat/")
 CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
@@ -72,6 +72,13 @@ async def main(args):
             print(f"程序操作：自动选择预约日期‘{args.date}’。")
             await select_date(page, args.date)
             existing = await fetch_user_reservations(page, api_auth)
+            print(f"当天预约记录：{daily_reservation_details(existing, args.date) or '无'}")
+            active_today = active_reservations_for_day(existing, args.date)
+            if active_today:
+                details = "；".join(reservation_summary(item) for item in active_today)
+                print(f"当天已经存在有效预约，学校限制一次只能预约一个时间段，跳过本次预约：{details}")
+                await context.close()
+                return
             similar = find_similar_reservation(existing, args.date, args.room, args.start, args.end)
             if similar:
                 print(f"首页已检测到相近预约，跳过选座和提交：{reservation_summary(similar)}")
@@ -158,6 +165,14 @@ async def main(args):
         # Recheck immediately before submit in case another process created a
         # similar reservation after the homepage check.
         existing = await fetch_user_reservations(page, api_auth)
+        print(f"提交前当天预约记录：{daily_reservation_details(existing, args.date) or '无'}")
+        active_today = active_reservations_for_day(existing, args.date)
+        if active_today:
+            details = "；".join(reservation_summary(item) for item in active_today)
+            print(f"提交前发现当天已有有效预约，学校限制一次只能预约一个时间段，取消本次提交：{details}")
+            await close_time_dialog(page)
+            await context.close()
+            return
         similar = find_similar_reservation(existing, args.date, args.room, args.start, args.end)
         if similar:
             print(f"提交前再次检测到相近预约，取消本次操作：{reservation_summary(similar)}")
@@ -188,29 +203,43 @@ async def main(args):
         await page.wait_for_timeout(1000)
         page_text = await page.locator("body").inner_text()
         print("提交后的页面提示：", " ".join(page_text.split())[-500:])
+        submission_signal = submission_notice(page_text)
+        if submission_signal[1]:
+            print(f"提交页面信号：{submission_signal[1]}")
         if await close_success_dialog(page):
             print("已自动关闭预约成功弹窗。")
         print("正在打开‘我的预约’核验……")
-        await page.get_by_text("我的预约", exact=True).last.click()
+        try:
+            await page.get_by_text("我的预约", exact=True).last.click()
+        except Exception as exc:
+            print(f"打开‘我的预约’页面失败，将只通过接口核验：{exc}")
         try:
             await page.wait_for_function("() => document.body.innerText.includes('我的预约') && !document.body.innerText.includes('正在加载')", timeout=15000)
         except Exception:
             pass
-        await page.wait_for_timeout(1500)
-        verification_text = await page.locator("body").inner_text()
-        if reservation_matches(verification_text, args.date, args.room, selected.number, args.start, args.end):
+        verification_status, matched_reservation, verification_message = await wait_for_reservation_confirmation(
+            page, api_auth, args.date, args.room, selected.number, args.start, args.end, submission_signal=submission_signal
+        )
+        if verification_status == "success":
             print(f"核验成功：{args.date}，{args.room}，座位 {selected.number}，{args.start}-{args.end}")
             send_preview_notification(
                 notifier,
                 args,
-                SeatResult(True, args.room, selected.number, "网页核验成功"),
+                SeatResult(True, args.room, selected.number, verification_message),
             )
-        else:
-            print("核验结果不明确：请在‘我的预约’页面手动确认，程序不会重复提交。")
+        elif verification_status == "failed":
+            print(f"预约明确失败：{verification_message}")
             send_preview_notification(
                 notifier,
                 args,
-                SeatResult(False, args.room, selected.number, "提交后核验结果不明确", conclusive=False),
+                SeatResult(False, args.room, selected.number, verification_message),
+            )
+        else:
+            print(f"核验结果不明确：{verification_message or '请在‘我的预约’页面手动确认'}；程序不会重复提交。")
+            send_preview_notification(
+                notifier,
+                args,
+                SeatResult(False, args.room, selected.number, verification_message or "提交后核验结果不明确", conclusive=False),
             )
         print(f"页面：{sanitize_url(page.url)}")
         if not args.submit or args.confirm_submit:
@@ -225,6 +254,82 @@ def send_preview_notification(notifier, args, result) -> bool:
     else:
         print("企业微信通知未发送（未配置或发送失败）。")
     return sent
+
+
+def reservation_verification_status(
+    reservations: list[dict],
+    page_text: str,
+    day: str,
+    room: str,
+    seat: str,
+    start: str,
+    end: str,
+    submission_signal: tuple[str, str] = ("", ""),
+) -> tuple[str, dict | None, str]:
+    all_today = day_reservations(reservations, day)
+    active_today = active_reservations_for_day(all_today, day)
+    all_details = daily_reservation_details(all_today, day)
+    matched = find_matching_reservation(reservations, day, room, seat, start, end)
+    if matched:
+        return "success", matched, f"网页历史记录已确认；当天全部预约：{all_details}"
+    normalized = " ".join((page_text or "").replace("：", ":").split())
+    for marker in ("当天已有预约", "已有预约", "只能预约一个", "预约失败", "座位已被占用", "不能预约", "无法预约", "预约冲突"):
+        if marker in normalized:
+            suffix = f"；当天全部预约：{all_details}" if all_details else ""
+            return "failed", None, f"{marker}{suffix}"
+    if active_today:
+        return "failed", None, f"当天已有其他有效预约，本次请求未生效；当天全部预约：{all_details}"
+    if submission_signal[0] == "success":
+        return "uncertain", None, f"页面提示预约成功，但历史接口尚未出现匹配记录；当天全部预约：{all_details or '无'}"
+    return "uncertain", None, f"提交后未在我的预约历史中找到完全匹配记录；当天全部预约：{all_details or '无'}"
+
+
+def daily_reservation_details(reservations: list[dict], day: str) -> str:
+    """Render all history records for a day with their native status."""
+    records = day_reservations(reservations, day)
+    details = []
+    for item in records:
+        status = str(item.get("stat") or item.get("status") or item.get("state") or "UNKNOWN").strip()
+        details.append(f"[{status}] {reservation_summary(item)}")
+    return "；".join(details)
+
+
+def submission_notice(page_text: str) -> tuple[str, str]:
+    normalized = " ".join((page_text or "").replace("：", ":").split())
+    for marker in ("当天已有预约", "已有预约", "只能预约一个", "预约失败", "座位已被占用", "不能预约", "无法预约", "预约冲突"):
+        if marker in normalized:
+            return "failed", marker
+    if "预约成功" in normalized:
+        return "success", "预约成功"
+    return "", ""
+
+
+async def wait_for_reservation_confirmation(
+    page,
+    auth_state: dict,
+    day: str,
+    room: str,
+    seat: str,
+    start: str,
+    end: str,
+    timeout_ms: int = 15000,
+    submission_signal: tuple[str, str] = ("", ""),
+) -> tuple[str, dict | None, str]:
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    last_error = ""
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            reservations = await fetch_user_reservations(page, auth_state)
+            page_text = await page.locator("body").inner_text()
+            status, matched, message = reservation_verification_status(
+                reservations, page_text, day, room, seat, start, end, submission_signal
+            )
+            if status != "uncertain":
+                return status, matched, message
+        except Exception as exc:
+            last_error = str(exc)
+        await page.wait_for_timeout(500)
+    return "uncertain", None, last_error or "提交后未在我的预约历史中找到完全匹配记录"
 
 
 async def login_if_configured(page):
@@ -317,7 +422,57 @@ async def wait_for_api_auth(page, auth_state: dict, timeout_ms=5000) -> dict:
 
 async def fetch_user_reservations(page, auth_state: dict) -> list[dict]:
     auth = await wait_for_api_auth(page, auth_state)
+    history_error = None
+    current_error = None
+    try:
+        history = await fetch_reservation_history(page, auth)
+    except RuntimeError as exc:
+        history = []
+        history_error = str(exc)
+    try:
+        current = await fetch_current_reservations(page, auth)
+    except RuntimeError as exc:
+        current = []
+        current_error = str(exc)
+    if history_error and current_error:
+        raise RuntimeError(
+            "无法读取预约历史或当前预约，已停止："
+            f"历史接口：{history_error}；当前预约接口：{current_error}"
+        )
+    return unique_reservation_records(history + current)
+
+
+async def fetch_reservation_history(page, auth: dict) -> list[dict]:
+    reservations = []
+    page_number = 1
+    page_size = 100
+    while True:
+        endpoint = f"/rest/v2/history/{page_number}/{page_size}?token={quote(auth['token'], safe='')}"
+        body = await fetch_reservation_payload(page, endpoint, auth["headers"], "读取预约历史")
+        batch, total = history_page_records(body)
+        reservations.extend(batch)
+        try:
+            total_count = int(total) if total is not None else None
+        except (TypeError, ValueError):
+            total_count = None
+        if not batch:
+            return reservations
+        if total_count is not None:
+            if len(reservations) >= total_count:
+                return reservations
+        elif len(batch) < page_size:
+            return reservations
+        page_number += 1
+
+
+async def fetch_current_reservations(page, auth: dict) -> list[dict]:
     endpoint = f"/rest/v2/user/reservations?token={quote(auth['token'], safe='')}"
+    body = await fetch_reservation_payload(page, endpoint, auth["headers"], "读取当前预约")
+    records, _ = history_page_records(body)
+    return records
+
+
+async def fetch_reservation_payload(page, endpoint: str, headers: dict, label: str) -> dict:
     payload = await page.evaluate(
         """async ({endpoint, headers}) => {
             const response = await fetch(endpoint, {
@@ -330,25 +485,31 @@ async def fetch_user_reservations(page, auth_state: dict) -> list[dict]:
             try { body = text ? JSON.parse(text) : {}; } catch (_) { body = {message: text}; }
             return {status: response.status, body};
         }""",
-        {"endpoint": endpoint, "headers": auth["headers"]},
+        {"endpoint": endpoint, "headers": headers},
     )
     if payload.get("status") != 200:
-        raise RuntimeError(f"读取当前预约失败：HTTP {payload.get('status')}")
+        raise RuntimeError(f"{label}失败：HTTP {payload.get('status')}")
     body = payload.get("body") or {}
     if body.get("code") not in (None, 0, "0"):
-        raise RuntimeError(f"读取当前预约失败：code={body.get('code')}，message={body.get('message') or '无'}")
-    data = body.get("data", [])
-    if isinstance(data, list):
-        return [item for item in data if isinstance(item, dict)]
-    if isinstance(data, dict):
-        for key in ("reservations", "records", "rows", "list"):
-            if isinstance(data.get(key), list):
-                return [item for item in data[key] if isinstance(item, dict)]
-    return []
+        raise RuntimeError(f"{label}失败：code={body.get('code')}，message={body.get('message') or '无'}")
+    return body
+
+
+def unique_reservation_records(records: list[dict]) -> list[dict]:
+    unique = []
+    seen = set()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        key = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
+        if key not in seen:
+            seen.add(key)
+            unique.append(record)
+    return unique
 
 
 def reservation_summary(item: dict) -> str:
-    location = str(item.get("location") or "").strip()
+    location = str(item.get("location") or item.get("loc") or "").strip()
     location_room = re.split(r"[，,]", location, maxsplit=1)[0].strip()
     location_seat = re.search(r"(?:座位号|座位)\s*([0-9A-Za-z-]+)", location)
     room = item.get("roomName") or item.get("room_name") or item.get("room") or location_room or "阅览室未知"

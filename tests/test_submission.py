@@ -1,4 +1,4 @@
-from seat_assistant.submission import confirmation_required, end_time_response_matches_start, end_times_request_url, end_times_response_matches, find_similar_reservation, normalize_time_option, reservation_matches, requested_times_available, submission_settled, time_option_id, time_options, time_to_minutes, time_values
+from seat_assistant.submission import active_reservations_for_day, confirmation_required, day_reservations, end_time_response_matches_start, end_times_request_url, end_times_response_matches, find_matching_reservation, find_similar_reservation, history_page_records, normalize_time_option, reservation_matches, requested_times_available, submission_settled, time_option_id, time_options, time_to_minutes, time_values
 
 
 def test_submission_only_prompts_for_explicit_debug_confirmation():
@@ -158,3 +158,145 @@ def test_find_similar_reservation_requires_an_explicit_active_status():
         "15:00",
         "17:00",
     ) is None
+
+
+def test_find_similar_reservation_reads_history_stat_and_loc_fields():
+    reservation = {
+        "date": "2026-08-20",
+        "loc": "南校区第二图书馆4层4层计算机类借阅区，座位号169",
+        "begin": "15:00",
+        "end": "17:00",
+        "stat": "RESERVE",
+    }
+
+    assert find_similar_reservation(
+        [reservation],
+        "2026-08-20",
+        "4层计算机类借阅区",
+        "15:00",
+        "17:00",
+    ) == reservation
+
+
+def test_find_similar_reservation_ignores_history_records_not_reserved():
+    reservation = {
+        "date": "2026-08-20",
+        "loc": "南校区第二图书馆4层4层计算机类借阅区，座位号169",
+        "begin": "15:00",
+        "end": "17:00",
+        "stat": "CANCEL",
+    }
+
+    assert find_similar_reservation(
+        [reservation],
+        "2026-08-20",
+        "4层计算机类借阅区",
+        "15:00",
+        "17:00",
+    ) is None
+
+
+def test_find_matching_reservation_verifies_history_record_and_seat():
+    reservation = {
+        "date": "2026-08-20",
+        "loc": "南校区第二图书馆4层4层计算机类借阅区，座位号169",
+        "begin": "15:00",
+        "end": "17:00",
+        "stat": "RESERVE",
+    }
+
+    assert find_matching_reservation(
+        [reservation],
+        "2026-08-20",
+        "4层计算机类借阅区",
+        "169",
+        "15:00",
+        "17:00",
+    ) == reservation
+    assert find_matching_reservation(
+        [reservation],
+        "2026-08-20",
+        "4层计算机类借阅区",
+        "168",
+        "15:00",
+        "17:00",
+    ) is None
+
+
+def test_active_reservations_for_day_does_not_require_time_overlap():
+    reservations = [
+        {
+            "date": "2026-08-20",
+            "loc": "南校区第二图书馆4层4层计算机类借阅区，座位号169",
+            "begin": "20:00",
+            "end": "21:00",
+            "stat": "RESERVE",
+        },
+        {
+            "date": "2026-08-20",
+            "loc": "南校区第二图书馆4层4层计算机类借阅区，座位号168",
+            "begin": "15:00",
+            "end": "17:00",
+            "stat": "CANCEL",
+        },
+    ]
+
+    assert active_reservations_for_day(reservations, "2026-08-20") == [reservations[0]]
+
+
+def test_day_reservations_keeps_all_statuses_for_reporting():
+    reservations = [
+        {"date": "2026-08-20", "stat": "RESERVE"},
+        {"date": "2026-08-20", "stat": "CANCEL"},
+        {"date": "2026-08-21", "stat": "RESERVE"},
+    ]
+
+    assert day_reservations(reservations, "2026-08-20") == reservations[:2]
+
+
+def test_history_stat_only_reserve_is_active():
+    base = {
+        "date": "2026-08-20",
+        "loc": "阅览室，座位号169",
+        "begin": "20:00",
+        "end": "21:00",
+    }
+
+    assert len(active_reservations_for_day([{**base, "stat": "RESERVE"}], "2026-08-20")) == 1
+    assert active_reservations_for_day([{**base, "stat": "AWAY"}], "2026-08-20") == []
+    assert active_reservations_for_day([{**base, "stat": "CHECK_IN"}], "2026-08-20") == []
+    assert active_reservations_for_day([{**base, "stat": "IN_USE"}], "2026-08-20") == []
+    assert active_reservations_for_day([{**base, "stat": "COMPLETE"}], "2026-08-20") == []
+
+
+def test_history_page_records_unwraps_nested_data_records_and_total_count():
+    record = {
+        "date": "2026-08-20",
+        "begin": "20:00",
+        "end": "21:00",
+        "loc": "4层计算机类借阅区，座位号169",
+        "stat": "RESERVE",
+    }
+
+    records, total = history_page_records({
+        "code": 0,
+        "data": {"data": {"records": [record]}, "totalCount": 1},
+    })
+
+    assert records == [record]
+    assert total == 1
+
+
+def test_history_page_records_accepts_a_single_record_object():
+    record = {
+        "date": "2026-08-20",
+        "begin": "20:00",
+        "end": "21:00",
+        "loc": "4层计算机类借阅区，座位号169",
+        "stat": "RESERVE",
+    }
+
+    records, total = history_page_records({"code": 0, "data": record})
+
+    assert records == [record]
+    assert total is None

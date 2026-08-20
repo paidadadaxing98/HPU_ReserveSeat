@@ -19,6 +19,14 @@ class AssistantService:
         existing = self.repo.get_reservation(day, period_name)
         if existing and existing["status"] == "reserved":
             return SeatResult(True, existing["room"], existing["seat"], "已存在预约")
+        if existing and existing["status"] == "uncertain":
+            return SeatResult(False, existing["room"], existing["seat"], "同一天已有一次预约，但上次结果不明确；已停止重试", conclusive=False)
+        for record in self.repo.reservations(day):
+            record_period, status, _, _, room, seat = record
+            if record_period != period_name and status in {"reserved", "uncertain"}:
+                if status == "uncertain":
+                    return SeatResult(False, room, seat, "同一天已有一次预约，但上次结果不明确；已停止重试", conclusive=False)
+                return SeatResult(False, room, seat, "当天已有预约，学校限制同一天只能预约一个时间段", conclusive=True)
         expected = arrival_override or self.repo.default_override(period_name) or self.repo.learned_default(period_name, period.default_arrival)
         try:
             expected_time = parse_hhmm(expected)

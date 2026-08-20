@@ -39,6 +39,32 @@ def test_reserve_period_does_not_submit_again_after_success(tmp_path):
     assert repo.get_reservation("2026-08-21", "morning")["status"] == "reserved"
 
 
+def test_reserve_period_blocks_another_period_when_day_already_has_booking(tmp_path):
+    adapter = FakeAdapter()
+    service, repo = make_service(tmp_path, adapter)
+
+    service.reserve_period("2026-08-21", "evening")
+    result = service.reserve_period("2026-08-21", "afternoon")
+
+    assert result.success is False
+    assert result.conclusive is True
+    assert "当天已有预约" in result.message
+    assert len(adapter.reserve_calls) == 1
+
+
+def test_reserve_period_does_not_retry_an_uncertain_same_day_booking(tmp_path):
+    adapter = FakeAdapter(reserve_results=[SeatResult(False, message="提交后未确认", conclusive=False)])
+    service, repo = make_service(tmp_path, adapter)
+
+    first = service.reserve_period("2026-08-21", "evening")
+    second = service.reserve_period("2026-08-21", "afternoon")
+
+    assert first.conclusive is False
+    assert second.conclusive is False
+    assert "不明确" in second.message
+    assert len(adapter.reserve_calls) == 1
+
+
 def test_cancel_does_not_mark_reservation_cancelled_when_result_is_uncertain(tmp_path):
     adapter = FakeAdapter(cancel_results=[SeatResult(False, message="timeout", conclusive=False)])
     service, repo = make_service(tmp_path, adapter)

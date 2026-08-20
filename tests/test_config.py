@@ -13,6 +13,11 @@ def test_settings_reject_blank_control_token():
         Settings(control_token="")
 
 
+def test_settings_reject_multiple_daily_reservations():
+    with pytest.raises(ValueError, match="只能为 1"):
+        Settings(control_token="local-token", max_reservations_per_run=2)
+
+
 def test_settings_bind_control_server_to_localhost_by_default():
     assert Settings(control_token="local-token").control_host == "127.0.0.1"
 

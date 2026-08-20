@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 from seat_assistant.reservation import SeatResult
-from scripts.preview_reservation import close_success_dialog, reservation_summary, send_preview_notification
+from scripts.preview_reservation import close_success_dialog, daily_reservation_details, fetch_user_reservations, reservation_summary, reservation_verification_status, send_preview_notification, submission_notice
 
 
 def test_preview_notification_uses_manual_booking_context():
@@ -31,6 +31,286 @@ def test_reservation_summary_reads_live_api_location_and_time_fields():
     })
 
     assert summary == "南校区第二图书馆4层4层计算机类 借阅区，座位 169，15:00-17:00"
+
+
+def test_fetch_user_reservations_reads_paginated_history_endpoint():
+    first_page = [{"id": index} for index in range(100)]
+    second_page = [{"id": 100}]
+
+    class Page:
+        def __init__(self):
+            self.endpoints = []
+
+        async def evaluate(self, script, payload):
+            self.endpoints.append(payload["endpoint"])
+            if "/history/1/100?" in payload["endpoint"]:
+                return {"status": 200, "body": {"code": 0, "data": {"reservations": first_page, "count": "101"}}}
+            if "/history/2/100?" in payload["endpoint"]:
+                return {"status": 200, "body": {"code": 0, "data": {"reservations": second_page, "count": "101"}}}
+            if "/user/reservations?" in payload["endpoint"]:
+                return {"status": 200, "body": {"code": 0, "data": []}}
+            raise AssertionError(f"unexpected endpoint: {payload['endpoint']}")
+
+        def is_closed(self):
+            return False
+
+    page = Page()
+    reservations = asyncio.run(fetch_user_reservations(page, {"headers": {"authorization": "x"}, "token": "token"}))
+
+    assert len(reservations) == 101
+    assert page.endpoints == [
+        "/rest/v2/history/1/100?token=token",
+        "/rest/v2/history/2/100?token=token",
+        "/rest/v2/user/reservations?token=token",
+    ]
+
+
+def test_fetch_user_reservations_unwraps_nested_history_payload():
+    record = {
+        "date": "2026-08-20",
+        "begin": "20:00",
+        "end": "21:00",
+        "loc": "4层计算机类借阅区，座位号169",
+        "stat": "RESERVE",
+    }
+
+    class Page:
+        def __init__(self):
+            self.endpoints = []
+
+        async def evaluate(self, script, payload):
+            self.endpoints.append(payload["endpoint"])
+            return {"status": 200, "body": {"code": 0, "data": {"data": {"records": [record]}, "totalCount": 1}}}
+
+        def is_closed(self):
+            return False
+
+    page = Page()
+    assert asyncio.run(fetch_user_reservations(page, {"headers": {"authorization": "x"}, "token": "token"})) == [record]
+
+
+def test_fetch_user_reservations_uses_total_count_even_when_page_is_short():
+    records = [
+        {"date": "2026-08-20", "begin": "20:00", "end": "21:00", "stat": "RESERVE"},
+        {"date": "2026-08-20", "begin": "15:00", "end": "17:00", "stat": "CANCEL"},
+    ]
+
+    class Page:
+        def __init__(self):
+            self.endpoints = []
+
+        async def evaluate(self, script, payload):
+            self.endpoints.append(payload["endpoint"])
+            if "/user/reservations?" in payload["endpoint"]:
+                return {"status": 200, "body": {"code": 0, "data": []}}
+            page_number = payload["endpoint"].split("/history/", 1)[1].split("/", 1)[0]
+            index = int(page_number) - 1
+            return {"status": 200, "body": {"code": 0, "data": {"records": [records[index]], "totalCount": 2}}}
+
+        def is_closed(self):
+            return False
+
+    page = Page()
+    assert asyncio.run(fetch_user_reservations(page, {"headers": {"authorization": "x"}, "token": "token"})) == records
+    assert page.endpoints == [
+        "/rest/v2/history/1/100?token=token",
+        "/rest/v2/history/2/100?token=token",
+        "/rest/v2/user/reservations?token=token",
+    ]
+
+
+def test_fetch_user_reservations_merges_current_reservation_fallback():
+    cancelled = {"date": "2026-08-20", "begin": "15:00", "end": "17:00", "stat": "CANCEL"}
+    reserved = {"date": "2026-08-20", "begin": "20:00", "end": "21:00", "stat": "RESERVE"}
+
+    class Page:
+        def __init__(self):
+            self.endpoints = []
+
+        async def evaluate(self, script, payload):
+            endpoint = payload["endpoint"]
+            self.endpoints.append(endpoint)
+            if "/history/1/100?" in endpoint:
+                return {"status": 200, "body": {"code": 0, "data": {"records": [cancelled], "totalCount": 1}}}
+            if "/user/reservations?" in endpoint:
+                return {"status": 200, "body": {"code": 0, "data": [reserved]}}
+            raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+        def is_closed(self):
+            return False
+
+    page = Page()
+    assert asyncio.run(fetch_user_reservations(page, {"headers": {"authorization": "x"}, "token": "token"})) == [cancelled, reserved]
+    assert any("/user/reservations?" in endpoint for endpoint in page.endpoints)
+
+
+def test_fetch_user_reservations_falls_back_to_current_endpoint():
+    record = {
+        "date": "2026-08-20",
+        "begin": "20:00",
+        "end": "21:00",
+        "loc": "4层计算机类借阅区，座位号169",
+        "stat": "RESERVE",
+    }
+
+    class Page:
+        def __init__(self):
+            self.endpoints = []
+
+        async def evaluate(self, script, payload):
+            endpoint = payload["endpoint"]
+            self.endpoints.append(endpoint)
+            if "/history/" in endpoint:
+                return {"status": 200, "body": {"code": 0, "data": []}}
+            if endpoint == "/rest/v2/user/reservations?token=token":
+                return {"status": 200, "body": {"code": 0, "data": [record]}}
+            raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+        def is_closed(self):
+            return False
+
+    page = Page()
+    assert asyncio.run(fetch_user_reservations(page, {"headers": {"authorization": "x"}, "token": "token"})) == [record]
+    assert page.endpoints == [
+        "/rest/v2/history/1/100?token=token",
+        "/rest/v2/user/reservations?token=token",
+    ]
+
+
+def test_fetch_user_reservations_falls_back_when_history_endpoint_fails():
+    record = {"date": "2026-08-20", "begin": "20:00", "end": "21:00", "stat": "RESERVE"}
+
+    class Page:
+        async def evaluate(self, script, payload):
+            endpoint = payload["endpoint"]
+            if "/history/" in endpoint:
+                return {"status": 404, "body": {"code": 404, "message": "not found"}}
+            return {"status": 200, "body": {"code": 0, "data": [record]}}
+
+        def is_closed(self):
+            return False
+
+    assert asyncio.run(fetch_user_reservations(Page(), {"headers": {"authorization": "x"}, "token": "token"})) == [record]
+
+
+def test_fetch_user_reservations_falls_back_to_current_endpoint_when_history_is_unavailable():
+    record = {
+        "date": "2026-08-20",
+        "begin": "20:00",
+        "end": "21:00",
+        "loc": "4层计算机类借阅区，座位号169",
+        "stat": "RESERVE",
+    }
+
+    class Page:
+        def __init__(self):
+            self.endpoints = []
+
+        async def evaluate(self, script, payload):
+            endpoint = payload["endpoint"]
+            self.endpoints.append(endpoint)
+            if "/history/" in endpoint:
+                return {"status": 200, "body": {"code": 12, "message": "登录失败"}}
+            return {"status": 200, "body": {"code": 0, "data": [record]}}
+
+        def is_closed(self):
+            return False
+
+    page = Page()
+    assert asyncio.run(fetch_user_reservations(page, {"headers": {"authorization": "x"}, "token": "token"})) == [record]
+    assert page.endpoints == [
+        "/rest/v2/history/1/100?token=token",
+        "/rest/v2/user/reservations?token=token",
+    ]
+
+
+def test_reservation_verification_uses_history_record_before_page_text():
+    status, record, message = reservation_verification_status(
+        [{
+            "date": "2026-08-20",
+            "loc": "南校区第二图书馆4层4层计算机类借阅区，座位号169",
+            "begin": "15:00",
+            "end": "17:00",
+            "stat": "RESERVE",
+        }],
+        "预约成功页面没有完整展示条目",
+        "2026-08-20",
+        "4层计算机类借阅区",
+        "169",
+        "15:00",
+        "17:00",
+    )
+
+    assert status == "success"
+    assert record["stat"] == "RESERVE"
+    assert "确认" in message
+
+
+def test_reservation_verification_reports_explicit_failure_and_unknown_separately():
+    failed = reservation_verification_status([], "提示：当天已有预约，只能预约一个时间段", "2026-08-20", "阅览室", "169", "15:00", "17:00")
+    unknown = reservation_verification_status([], "预约成功", "2026-08-20", "阅览室", "169", "15:00", "17:00")
+
+    assert failed[0] == "failed"
+    assert failed[2].startswith("当天已有预约")
+    assert unknown[0] == "uncertain"
+
+
+def test_reservation_verification_reports_all_active_reservations_for_the_day():
+    status, record, message = reservation_verification_status(
+        [{
+            "date": "2026-08-20",
+            "loc": "南校区第二图书馆4层4层计算机类借阅区，座位号169",
+            "begin": "20:00",
+            "end": "21:00",
+            "stat": "RESERVE",
+        }],
+        "提示：当天已有预约，只能预约一个时间段",
+        "2026-08-20",
+        "4层计算机类借阅区",
+        "168",
+        "15:30",
+        "17:00",
+    )
+
+    assert status == "failed"
+    assert record is None
+    assert "座位 169" in message
+    assert "20:00-21:00" in message
+
+
+def test_submission_notice_captures_success_and_failure_popups():
+    assert submission_notice("预约成功\n请到馆签到") == ("success", "预约成功")
+    assert submission_notice("提示：当天已有预约，只能预约一个时间段") == ("failed", "当天已有预约")
+    assert submission_notice("正在玩命预约中") == ("", "")
+
+
+def test_reservation_verification_keeps_success_popup_as_evidence_when_history_is_delayed():
+    status, record, message = reservation_verification_status(
+        [],
+        "我的预约页面为空",
+        "2026-08-20",
+        "4层计算机类借阅区",
+        "169",
+        "15:00",
+        "17:00",
+        submission_signal=("success", "预约成功"),
+    )
+
+    assert status == "uncertain"
+    assert record is None
+    assert "页面提示预约成功" in message
+
+
+def test_daily_reservation_details_reports_all_records_and_statuses():
+    details = daily_reservation_details([
+        {"date": "2026-08-20", "loc": "阅览室，座位号169", "begin": "20:00", "end": "21:00", "stat": "RESERVE"},
+        {"date": "2026-08-20", "loc": "阅览室，座位号168", "begin": "15:00", "end": "17:00", "stat": "CANCEL"},
+    ], "2026-08-20")
+
+    assert "RESERVE" in details
+    assert "CANCEL" in details
+    assert "20:00-21:00" in details
+    assert "15:00-17:00" in details
 
 
 def test_close_success_dialog_clicks_header_close_button_and_waits_hidden():

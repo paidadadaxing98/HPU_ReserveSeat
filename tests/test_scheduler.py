@@ -37,7 +37,9 @@ def test_run_once_is_idempotent_after_a_completed_run(tmp_path):
 
     assert set(first) == {"morning", "afternoon", "evening"}
     assert second == first
-    assert len(adapter.reserve_calls) == 3
+    assert len(adapter.reserve_calls) == 1
+    assert first["afternoon"]["status"] == "skipped"
+    assert first["evening"]["status"] == "skipped"
 
 
 def test_run_once_isolates_one_period_exception(tmp_path):
@@ -47,6 +49,19 @@ def test_run_once_isolates_one_period_exception(tmp_path):
     result = run_once(service, "2026-08-21")
 
     assert result["morning"]["status"] == "uncertain"
-    assert result["afternoon"]["status"] == "reserved"
-    assert result["evening"]["status"] == "reserved"
-    assert [call[1] for call in adapter.reserve_calls] == ["morning", "afternoon", "evening"]
+    assert result["afternoon"]["status"] == "skipped"
+    assert result["evening"]["status"] == "skipped"
+    assert [call[1] for call in adapter.reserve_calls] == ["morning"]
+
+
+def test_run_once_stops_after_one_successful_period_when_account_allows_one_booking(tmp_path):
+    adapter = SchedulerAdapter()
+    settings = Settings(control_token="local-token", max_reservations_per_run=1)
+    service = AssistantService(settings, Repository(str(tmp_path / "db.sqlite")), adapter)
+
+    result = run_once(service, "2026-08-21")
+
+    assert [call[1] for call in adapter.reserve_calls] == ["morning"]
+    assert result["morning"]["status"] == "reserved"
+    assert result["afternoon"]["status"] == "skipped"
+    assert result["evening"]["status"] == "skipped"

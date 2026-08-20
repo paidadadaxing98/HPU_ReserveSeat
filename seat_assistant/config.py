@@ -31,6 +31,7 @@ class Settings:
     control_host: str = "127.0.0.1"
     wecom_webhook: str = ""
     login_url: str = "https://seatlib.hpu.edu.cn/libseat/"
+    max_reservations_per_run: int = 1
     periods: dict[str, Period] = field(default_factory=lambda: {
         "morning": Period(("08:30", "09:30"), ("11:30", "13:00"), "08:55"),
         "afternoon": Period(("14:00", "15:00"), ("17:30", "19:30"), "14:20"),
@@ -40,6 +41,8 @@ class Settings:
     def __post_init__(self):
         if not self.control_token.strip():
             raise ValueError("control_token cannot be blank")
+        if self.max_reservations_per_run != 1:
+            raise ValueError("max_reservations_per_run 只能为 1")
 
 
 def load_settings() -> Settings:
@@ -53,4 +56,5 @@ def load_settings() -> Settings:
         control_host=os.getenv("SEAT_CONTROL_HOST", "127.0.0.1"),
         wecom_webhook=os.getenv("SEAT_WECOM_WEBHOOK", ""),
         login_url=os.getenv("SEAT_LOGIN_URL", "https://seatlib.hpu.edu.cn/libseat/"),
+        max_reservations_per_run=int(os.getenv("SEAT_MAX_RESERVATIONS_PER_RUN", "1")),
     )
