@@ -458,3 +458,282 @@ def test_close_success_dialog_uses_global_confirm_button_when_dialog_is_custom()
 
     assert asyncio.run(close_success_dialog(page)) is True
     assert page.button.clicked is True
+
+
+def test_close_success_dialog_waits_for_outer_blocking_wrapper_to_hide():
+    class Root:
+        def __init__(self):
+            self.hidden = False
+            self.close_button = None
+
+        @property
+        def first(self):
+            return self
+
+        @property
+        def last(self):
+            return self
+
+        def nth(self, index):
+            return self
+
+        async def count(self):
+            return 1
+
+        async def is_visible(self):
+            return not self.hidden
+
+        def locator(self, selector):
+            return self.close_button
+
+        async def wait_for(self, state, timeout):
+            if state == "hidden" and not self.hidden:
+                raise TimeoutError("outer success wrapper is still visible")
+
+    class Marker:
+        def __init__(self, root):
+            self.root = root
+            self.hidden = False
+
+        @property
+        def first(self):
+            return self
+
+        @property
+        def last(self):
+            return self
+
+        def nth(self, index):
+            return self
+
+        def filter(self, **kwargs):
+            return self
+
+        def locator(self, selector):
+            return self.root
+
+        async def count(self):
+            return 1
+
+        async def is_visible(self):
+            return not self.hidden
+
+        async def wait_for(self, state, timeout):
+            if state == "hidden" and not self.hidden:
+                raise TimeoutError("success marker is still visible")
+
+    class Button:
+        def __init__(self, marker):
+            self.marker = marker
+            self.clicked = False
+
+        @property
+        def first(self):
+            return self
+
+        @property
+        def last(self):
+            return self
+
+        def nth(self, index):
+            return self
+
+        async def count(self):
+            return 1
+
+        async def is_visible(self):
+            return True
+
+        async def click(self):
+            self.clicked = True
+            # The inner success text disappears, but the outer wrapper remains
+            # and must be cleared before navigation continues.
+            self.marker.hidden = True
+
+    class WrongPageButton:
+        def __init__(self):
+            self.clicked = False
+
+        async def count(self):
+            return 1
+
+        def nth(self, index):
+            return self
+
+        async def is_visible(self):
+            return True
+
+        async def click(self):
+            self.clicked = True
+
+    class NoDialog:
+        @property
+        def first(self):
+            return self
+
+        @property
+        def last(self):
+            return self
+
+        def filter(self, **kwargs):
+            return self
+
+        async def wait_for(self, state, timeout):
+            raise TimeoutError("custom success view")
+
+    class Keyboard:
+        def __init__(self, root):
+            self.root = root
+
+        async def press(self, key):
+            if key == "Escape":
+                self.root.hidden = True
+
+    class Page:
+        def __init__(self):
+            self.root = Root()
+            self.marker = Marker(self.root)
+            self.button = Button(self.marker)
+            self.root.close_button = self.button
+            self.wrong_page_button = WrongPageButton()
+            self.keyboard = Keyboard(self.root)
+
+        def locator(self, selector):
+            if "data-seat-assistant-success-root" in selector:
+                return self.root
+            return NoDialog()
+
+        def get_by_text(self, pattern):
+            return self.marker
+
+        def get_by_role(self, role, name):
+            return self.wrong_page_button
+
+        async def evaluate(self, script, payload=None):
+            if "data-seat-assistant-success-root" in script and "setAttribute" in script:
+                return {"found": True}
+            return {"visible": not self.root.hidden}
+
+    page = Page()
+
+    assert asyncio.run(close_success_dialog(page)) is True
+    assert page.button.clicked is True
+    assert page.wrong_page_button.clicked is False
+    assert page.root.hidden is True
+
+
+def test_close_success_dialog_uses_escape_instead_of_page_button_when_root_has_no_control():
+    class EmptyActions:
+        async def count(self):
+            return 0
+
+    class Root:
+        def __init__(self):
+            self.hidden = False
+
+        def locator(self, selector):
+            return EmptyActions()
+
+        async def count(self):
+            return 1
+
+        async def is_visible(self):
+            return not self.hidden
+
+        async def wait_for(self, state, timeout):
+            if state == "hidden" and not self.hidden:
+                raise TimeoutError("success wrapper is still visible")
+
+    class Marker:
+        def __init__(self):
+            self.hidden = False
+
+        @property
+        def first(self):
+            return self
+
+        @property
+        def last(self):
+            return self
+
+        def nth(self, index):
+            return self
+
+        def filter(self, **kwargs):
+            return self
+
+        async def count(self):
+            return 1
+
+        async def is_visible(self):
+            return not self.hidden
+
+        async def wait_for(self, state, timeout):
+            if state == "hidden" and not self.hidden:
+                raise TimeoutError("success text is still visible")
+
+    class WrongPageButton:
+        def __init__(self):
+            self.clicked = False
+
+        async def count(self):
+            return 1
+
+        def nth(self, index):
+            return self
+
+        async def is_visible(self):
+            return True
+
+        async def click(self):
+            self.clicked = True
+
+    class NoDialog:
+        @property
+        def first(self):
+            return self
+
+        def filter(self, **kwargs):
+            return self
+
+        async def wait_for(self, state, timeout):
+            raise TimeoutError("custom success view")
+
+    class Keyboard:
+        def __init__(self, root, marker):
+            self.root = root
+            self.marker = marker
+            self.pressed = []
+
+        async def press(self, key):
+            self.pressed.append(key)
+            if key == "Escape":
+                self.root.hidden = True
+                self.marker.hidden = True
+
+    class Page:
+        def __init__(self):
+            self.root = Root()
+            self.marker = Marker()
+            self.wrong_page_button = WrongPageButton()
+            self.keyboard = Keyboard(self.root, self.marker)
+
+        def locator(self, selector):
+            if "data-seat-assistant-success-root" in selector:
+                return self.root
+            return NoDialog()
+
+        def get_by_text(self, pattern):
+            return self.marker
+
+        def get_by_role(self, role, name):
+            return self.wrong_page_button
+
+        async def evaluate(self, script, payload=None):
+            return {"found": True}
+
+    page = Page()
+
+    assert asyncio.run(close_success_dialog(page)) is True
+    assert page.keyboard.pressed == ["Escape"]
+    assert page.wrong_page_button.clicked is False

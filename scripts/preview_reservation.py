@@ -207,7 +207,7 @@ async def main(args):
         if submission_signal[1]:
             print(f"提交页面信号：{submission_signal[1]}")
         if await close_success_dialog(page):
-            print("已自动关闭预约成功弹窗。")
+            print("已自动关闭预约成功弹窗，并确认阻塞层已隐藏。")
         print("正在打开‘我的预约’核验……")
         try:
             await page.get_by_text("我的预约", exact=True).last.click()
@@ -655,8 +655,14 @@ async def close_time_dialog(page):
 
 
 async def close_success_dialog(page, timeout_ms=5000):
-    """Close the post-submit success UI before navigating to reservations."""
+    """Close the post-submit success UI and verify no blocking layer remains."""
     success_pattern = re.compile("预约成功")
+    annotation = await _mark_success_ui(page)
+    annotated_root = None
+    annotated_overlays = None
+    if annotation.get("found"):
+        annotated_root = await _present_locator(page.locator("[data-seat-assistant-success-root='true']:visible"))
+        annotated_overlays = await _present_locator(page.locator("[data-seat-assistant-success-overlay='true']:visible"))
     dialogs = page.locator(
         ".el-message-box:visible, .el-dialog:visible, [role='dialog']:visible"
     ).filter(has_text=success_pattern)
@@ -680,11 +686,23 @@ async def close_success_dialog(page, timeout_ms=5000):
             await dialog.wait_for(state="hidden", timeout=timeout_ms)
         except Exception as exc:
             raise RuntimeError("预约成功弹窗未能自动关闭，已停止后续核验。") from exc
+        if not await _wait_success_ui_hidden(None, annotated_root, annotated_overlays, timeout_ms):
+            await page.keyboard.press("Escape")
+            if not await _wait_success_ui_hidden(None, annotated_root, annotated_overlays, timeout_ms):
+                raise RuntimeError("预约成功弹窗或其阻塞层未能自动关闭，已停止后续核验。")
         return True
 
     # Some deployments render the success view outside Element UI's standard
-    # dialog classes. Find a visible success marker, then use the global
-    # confirmation button exposed by that custom view.
+    # dialog classes. Mark the actual blocking wrapper and any backdrop first;
+    # this prevents a page-level button from being mistaken for the close action.
+    root = None
+    overlays = None
+    if annotation.get("found"):
+        root = annotated_root
+        overlays = annotated_overlays
+
+    # Find a visible success marker, then use a close control inside its own
+    # wrapper whenever possible.
     marker = None
     markers = page.get_by_text(success_pattern)
     deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
@@ -699,21 +717,132 @@ async def close_success_dialog(page, timeout_ms=5000):
         await page.wait_for_timeout(100)
     if marker is None:
         return False
-    actions = page.get_by_role("button", name=re.compile("确定|关闭|我知道了|知道了|返回"))
-    visible_action = None
-    for index in range(await actions.count()):
-        candidate = actions.nth(index)
-        if await candidate.is_visible():
-            visible_action = candidate
-            break
+    visible_action = await _success_close_control(root, page)
     if visible_action is None:
-        raise RuntimeError("检测到预约成功提示，但未找到可用的关闭按钮。")
-    await visible_action.click()
-    try:
-        await marker.wait_for(state="hidden", timeout=timeout_ms)
-    except Exception as exc:
-        raise RuntimeError("预约成功弹窗未能自动关闭，已停止后续核验。") from exc
+        if root is None:
+            raise RuntimeError("检测到预约成功提示，但未找到可用的关闭按钮。")
+    else:
+        await visible_action.click()
+    hidden = await _wait_success_ui_hidden(marker, root, overlays, timeout_ms)
+    if not hidden:
+        # A few custom views ignore their button's click handler while still
+        # accepting Escape. Use it only after the scoped close action failed.
+        await page.keyboard.press("Escape")
+        hidden = await _wait_success_ui_hidden(marker, root, overlays, timeout_ms)
+    if not hidden:
+        raise RuntimeError("预约成功弹窗或其阻塞层未能自动关闭，已停止后续核验。")
     return True
+
+
+async def _mark_success_ui(page):
+    """Annotate the custom success wrapper and backdrop for reliable waiting."""
+    try:
+        result = await page.evaluate(
+            """() => {
+                const nodes = Array.from(document.querySelectorAll('body *'));
+                const marker = nodes
+                    .filter(node => {
+                        const style = getComputedStyle(node);
+                        return /预约成功/.test((node.textContent || '').trim())
+                            && node.getClientRects().length > 0
+                            && style.display !== 'none'
+                            && style.visibility !== 'hidden';
+                    })
+                    .sort((a, b) => (a.textContent || '').trim().length - (b.textContent || '').trim().length)[0];
+                if (!marker) return {found: false};
+
+                let root = marker;
+                let modalRoot = null;
+                for (let depth = 0; root && root !== document.body && depth < 10; depth += 1, root = root.parentElement) {
+                    const style = getComputedStyle(root);
+                    const className = typeof root.className === 'string' ? root.className : '';
+                    const modalLike = /dialog|modal|popup|layer|message|success|reserve/i.test(className)
+                        || root.getAttribute('role') === 'dialog'
+                        || ['fixed', 'absolute', 'sticky'].includes(style.position)
+                        || Number.parseInt(style.zIndex || '0', 10) > 10;
+                    if (modalLike) {
+                        modalRoot = root;
+                        break;
+                    }
+                }
+                const wrapper = modalRoot || marker.parentElement || marker;
+                wrapper.setAttribute('data-seat-assistant-success-root', 'true');
+                const candidates = [
+                    ...Array.from(wrapper.parentElement ? wrapper.parentElement.children : []),
+                    ...Array.from(wrapper.querySelectorAll('*')),
+                ];
+                for (const node of candidates) {
+                    const className = typeof node.className === 'string' ? node.className : '';
+                    if (/mask|overlay|backdrop|shade/i.test(className)) {
+                        node.setAttribute('data-seat-assistant-success-overlay', 'true');
+                    }
+                }
+                return {found: true};
+            }"""
+        )
+        return result if isinstance(result, dict) else {"found": False}
+    except Exception:
+        # Older test doubles and unusual pages may not expose evaluate; the
+        # marker/global fallback below remains available for those cases.
+        return {"found": False}
+
+
+async def _success_close_control(root, page):
+    selectors = (
+        ".el-message-box__headerbtn, .el-dialog__headerbtn, "
+        "button[aria-label*='关'], [role='button'][aria-label*='关'], "
+        "button[title*='关'], [role='button'][title*='关'], "
+        "button:has-text('确定'), button:has-text('关闭'), "
+        "button:has-text('我知道了'), button:has-text('知道了'), button:has-text('返回'), "
+        "[role='button']:has-text('确定'), [role='button']:has-text('关闭'), "
+        "[role='button']:has-text('我知道了'), [role='button']:has-text('知道了'), "
+        "[role='button']:has-text('返回'), .close, [class*='close']"
+    )
+    scopes = [root] if root is not None else [page]
+    for scope in scopes:
+        try:
+            actions = scope.locator(selectors)
+            for index in range(await actions.count()):
+                candidate = actions.nth(index)
+                if await candidate.is_visible():
+                    return candidate
+        except Exception:
+            continue
+    # Keep the existing role-based fallback only when no success wrapper could
+    # be identified. A known wrapper must never fall back to page-level actions.
+    if root is not None:
+        return None
+    try:
+        actions = page.get_by_role("button", name=re.compile("确定|关闭|我知道了|知道了|返回"))
+        for index in range(await actions.count()):
+            candidate = actions.nth(index)
+            if await candidate.is_visible():
+                return candidate
+    except Exception:
+        return None
+    return None
+
+
+async def _wait_success_ui_hidden(marker, root, overlays, timeout_ms):
+    targets = [target for target in (marker, root, overlays) if target is not None]
+    for target in targets:
+        try:
+            await target.wait_for(state="hidden", timeout=timeout_ms)
+        except Exception:
+            try:
+                if await target.is_visible():
+                    return False
+            except Exception:
+                return False
+    return True
+
+
+async def _present_locator(locator):
+    """Return a locator only when it can expose at least one matching node."""
+    try:
+        return locator if await locator.count() else None
+    except Exception:
+        return None
 
 
 async def auth_diagnostics(page, request_headers):
