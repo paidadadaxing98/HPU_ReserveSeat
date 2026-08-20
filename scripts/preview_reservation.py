@@ -18,7 +18,7 @@ from seat_assistant.end_times import parse_native_end_times
 from seat_assistant.booking_window import validate_booking_date
 from seat_assistant.preview import layout_from_response, layout_request_matches, normalize_room_name, preview_seat_candidates
 from seat_assistant.seat_inventory import seats_from_layout
-from seat_assistant.submission import confirmation_required, normalize_time_option, requested_times_available, reservation_matches, submission_settled, time_option_id, time_values, validate_half_hour_time
+from seat_assistant.submission import confirmation_required, end_time_response_matches_start, normalize_time_option, requested_times_available, reservation_matches, submission_settled, time_option_id, time_values, validate_half_hour_time
 
 SITE_URL = os.getenv("SEAT_LOGIN_URL", "https://seatlib.hpu.edu.cn/libseat/")
 CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
@@ -95,7 +95,7 @@ async def main(args):
                 start_id = time_option_id(candidate_start_body, "startTimes", args.start)
                 if not start_id:
                     raise RuntimeError(f"开始时间 {args.start} 缺少网页返回的原生 id，已停止。")
-                async with page.expect_response(lambda r: "/rest/v2/endTimesForSeat/" in r.url, timeout=15000) as end_info:
+                async with page.expect_response(lambda r: end_time_response_matches_start(r.url, start_id), timeout=15000) as end_info:
                     await click_and_verify_time(page, args.start, "开始", verify=True)
                 candidate_end_response = await end_info.value
                 candidate_end_body = await candidate_end_response.json()

@@ -1,4 +1,4 @@
-from seat_assistant.submission import confirmation_required, end_times_request_url, end_times_response_matches, normalize_time_option, reservation_matches, requested_times_available, submission_settled, time_option_id, time_options, time_to_minutes, time_values
+from seat_assistant.submission import confirmation_required, end_time_response_matches_start, end_times_request_url, end_times_response_matches, normalize_time_option, reservation_matches, requested_times_available, submission_settled, time_option_id, time_options, time_to_minutes, time_values
 
 
 def test_submission_requires_explicit_flag_and_phrase():
@@ -54,3 +54,10 @@ def test_time_options_preserve_native_server_ids():
 def test_end_times_request_url_can_use_native_start_id():
     assert end_times_request_url(20008, "2026-08-20", "09:00", start_id="540") == "rest/v2/endTimesForSeat/20008/2026-08-20/540"
     assert end_times_request_url(20008, "2026-08-20", "现在", start_id="now") == "rest/v2/endTimesForSeat/20008/2026-08-20/now"
+
+
+def test_end_time_response_must_match_selected_start_id_not_just_endpoint():
+    initial = "https://seatlib.hpu.edu.cn/rest/v2/endTimesForSeat/20008/2026-08-20/now?id=20008&date=2026-08-20&start=now"
+    selected = "https://seatlib.hpu.edu.cn/rest/v2/endTimesForSeat/20008/2026-08-20/570?id=20008&date=2026-08-20&start=570"
+    assert not end_time_response_matches_start(initial, "570")
+    assert end_time_response_matches_start(selected, "570")

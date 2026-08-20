@@ -54,8 +54,20 @@ def end_times_request_url(seat_id: int | str, day: str, start: str, start_id: st
     return f"rest/v2/endTimesForSeat/{seat_id}/{day}/{start_id if start_id is not None else time_to_minutes(start)}"
 
 
+def end_time_response_matches_start(url: str, start_id: str) -> bool:
+    """Match the native end-time response to the selected start option id."""
+    from urllib.parse import parse_qs, urlsplit
+
+    if "/rest/v2/endTimesForSeat/" not in url:
+        return False
+    parts = urlsplit(url)
+    path_id = parts.path.rstrip("/").rsplit("/", 1)[-1]
+    query_start = parse_qs(parts.query).get("start", [None])[0]
+    return path_id == str(start_id) and (query_start is None or query_start == str(start_id))
+
+
 def end_times_response_matches(url: str, start: str) -> bool:
-    return "/rest/v2/endTimesForSeat/" in url and url.rstrip("/").endswith("/" + time_to_minutes(start))
+    return end_time_response_matches_start(url, time_to_minutes(start))
 
 
 def validate_half_hour_time(value: str) -> str:
