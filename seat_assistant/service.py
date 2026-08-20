@@ -3,13 +3,14 @@ from datetime import date
 from .commands import Command
 from .config import Settings
 from .domain import build_reservation, parse_hhmm, reservation_start_for_arrival
+from .notifications import send_reservation_notification
 from .reservation import SeatResult
 from .storage import Repository
 
 
 class AssistantService:
-    def __init__(self, settings: Settings, repo: Repository, adapter):
-        self.settings, self.repo, self.adapter = settings, repo, adapter
+    def __init__(self, settings: Settings, repo: Repository, adapter, notifier=None):
+        self.settings, self.repo, self.adapter, self.notifier = settings, repo, adapter, notifier
 
     def reserve_period(self, day: str, period_name: str, arrival_override: str | None = None):
         if period_name not in self.settings.periods:
@@ -33,6 +34,7 @@ class AssistantService:
             result = SeatResult(False, message=f"预约适配器异常：{exc}", conclusive=False)
         status = "reserved" if result.success else "uncertain" if not result.conclusive else "failed"
         self.repo.save_reservation(day, period_name, status, start, end, result.room, result.seat, result.message)
+        send_reservation_notification(self.notifier, day, period_name, result, start, end)
         return result
 
     def apply_command(self, command: Command, day: str | None = None):

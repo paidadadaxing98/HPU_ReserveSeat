@@ -3,22 +3,26 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from pathlib import Path
+from urllib.parse import parse_qs, quote, urlsplit
 from playwright.async_api import async_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from seat_assistant.calibration import sanitize_url
-from seat_assistant.auth_flow import auth_header_names, captcha_input_selectors, credentials_available, is_seat_app_url, library_selected, normalize_library
+from seat_assistant.auth_flow import auth_header_names, browser_api_headers, captcha_input_selectors, credentials_available, is_seat_app_url, library_selected, normalize_library
 from seat_assistant.config import _load_dotenv
 from seat_assistant.date_selection import date_option_matches, normalize_date
 from seat_assistant.end_times import parse_native_end_times
 from seat_assistant.booking_window import validate_booking_date
+from seat_assistant.notifications import WeComNotifier, send_reservation_notification
 from seat_assistant.preview import layout_from_response, layout_request_matches, normalize_room_name, preview_seat_candidates
+from seat_assistant.reservation import SeatResult
 from seat_assistant.seat_inventory import seats_from_layout
-from seat_assistant.submission import confirmation_required, end_time_response_matches_start, normalize_time_option, requested_times_available, reservation_matches, submission_settled, time_option_id, time_values, validate_half_hour_time
+from seat_assistant.submission import confirmation_required, end_time_response_matches_start, find_similar_reservation, normalize_time_option, requested_times_available, reservation_matches, submission_settled, time_option_id, time_values, validate_half_hour_time
 
 SITE_URL = os.getenv("SEAT_LOGIN_URL", "https://seatlib.hpu.edu.cn/libseat/")
 CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
@@ -27,12 +31,22 @@ PROFILE = Path(".browser-profile").resolve()
 
 async def main(args):
     _load_dotenv()
+    notifier = WeComNotifier(os.getenv("SEAT_WECOM_WEBHOOK", ""))
     validate_booking_date(args.date, __import__('datetime').datetime.now())
     args.start = validate_half_hour_time(args.start)
     args.end = validate_half_hour_time(args.end)
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(str(PROFILE), executable_path=CHROME, headless=False, viewport={"width": 1440, "height": 900})
         page = context.pages[0] if context.pages else await context.new_page()
+        api_auth = {"headers": {}, "token": ""}
+        capture_tasks = set()
+
+        def capture_request(request):
+            task = asyncio.create_task(capture_page_request(api_auth, request))
+            capture_tasks.add(task)
+            task.add_done_callback(capture_tasks.discard)
+
+        page.on("request", capture_request)
         try:
             await page.goto(os.getenv("SEAT_LOGIN_URL", SITE_URL), wait_until="domcontentloaded")
             # The seat app may briefly render #/login while its SSO redirect
@@ -57,6 +71,12 @@ async def main(args):
             await select_library(page, "南校区第二图书馆")
             print(f"程序操作：自动选择预约日期‘{args.date}’。")
             await select_date(page, args.date)
+            existing = await fetch_user_reservations(page, api_auth)
+            similar = find_similar_reservation(existing, args.date, args.room, args.start, args.end)
+            if similar:
+                print(f"首页已检测到相近预约，跳过选座和提交：{reservation_summary(similar)}")
+                await context.close()
+                return
             print(f"程序操作：自动点击阅览室‘{args.room}’，请不要在网页上点击阅览室。")
             async with page.expect_response(lambda response: layout_request_matches(response.url), timeout=30000) as response_info:
                 await page.get_by_text(args.room, exact=True).first.click()
@@ -87,6 +107,7 @@ async def main(args):
                 candidate_start_response = await start_info.value
                 candidate_start_body = await candidate_start_response.json()
                 candidate_headers = await candidate_start_response.request.all_headers()
+                record_api_auth(api_auth, candidate_start_response.request.url, candidate_headers)
                 if candidate_start_body.get("code") not in (0, "0"):
                     raise RuntimeError(f"开始时间接口失败：code={candidate_start_body.get('code')}，message={candidate_start_body.get('message') or '无'}")
                 normalized_start = time_values(candidate_start_body, "startTimes")
@@ -99,6 +120,8 @@ async def main(args):
                     await click_and_verify_time(page, args.start, "开始", verify=True)
                 candidate_end_response = await end_info.value
                 candidate_end_body = await candidate_end_response.json()
+                candidate_end_headers = await candidate_end_response.request.all_headers()
+                record_api_auth(api_auth, candidate_end_response.request.url, candidate_end_headers)
                 native_end = parse_native_end_times(candidate_end_response.url, candidate_end_body)
                 candidate_end = list(native_end.options)
                 end_url = native_end.url
@@ -132,12 +155,17 @@ async def main(args):
                 f"没有找到同时满足 {args.start}-{args.end} 的空闲座位：{details}。"
                 f"认证诊断（仅字段名，不含值）：{diagnostics}"
             )
-        # Refuse to submit when an existing reservation is already present for
-        # the requested day; this prevents duplicate reservations on reruns.
-        existing = await page.evaluate("""async () => (await (await fetch('/rest/v2/user/reservations')).json()).data""")
-        if existing and any(str(item.get('date', item.get('day', ''))) == args.date for item in existing if isinstance(item, dict)):
-            raise RuntimeError(f"你在 {args.date} 已经存在预约，已停止，不会重复提交。")
-        if confirmation_required(args.submit, input("当前页面已选好座位和时间。输入 SUBMIT 才会提交，直接回车保持预览：")):
+        # Recheck immediately before submit in case another process created a
+        # similar reservation after the homepage check.
+        existing = await fetch_user_reservations(page, api_auth)
+        similar = find_similar_reservation(existing, args.date, args.room, args.start, args.end)
+        if similar:
+            print(f"提交前再次检测到相近预约，取消本次操作：{reservation_summary(similar)}")
+            await close_time_dialog(page)
+            await context.close()
+            return
+        phrase = input("当前页面已选好座位和时间。输入 SUBMIT 才会提交，直接回车保持预览：") if args.confirm_submit else ""
+        if confirmation_required(args.submit, args.confirm_submit, phrase):
             print("预览已完成：页面停在‘立即预约’前。没有提交预约。")
             print(f"页面：{sanitize_url(page.url)}")
             input("确认页面选择正确后按回车关闭预览：")
@@ -149,12 +177,19 @@ async def main(args):
             await page.wait_for_function("() => !document.body.innerText.includes('正在玩命预约中') && !document.body.innerText.includes('玩命预约')", timeout=30000)
         except Exception:
             print("提交请求超过 30 秒仍未结束，结果不明确；不会重复提交。")
+            send_preview_notification(
+                notifier,
+                args,
+                SeatResult(False, args.room, selected.number, "提交请求超过 30 秒仍未结束", conclusive=False),
+            )
             input("请在浏览器中检查状态后按回车关闭：")
             await context.close()
             return
         await page.wait_for_timeout(1000)
         page_text = await page.locator("body").inner_text()
         print("提交后的页面提示：", " ".join(page_text.split())[-500:])
+        if await close_success_dialog(page):
+            print("已自动关闭预约成功弹窗。")
         print("正在打开‘我的预约’核验……")
         await page.get_by_text("我的预约", exact=True).last.click()
         try:
@@ -165,11 +200,31 @@ async def main(args):
         verification_text = await page.locator("body").inner_text()
         if reservation_matches(verification_text, args.date, args.room, selected.number, args.start, args.end):
             print(f"核验成功：{args.date}，{args.room}，座位 {selected.number}，{args.start}-{args.end}")
+            send_preview_notification(
+                notifier,
+                args,
+                SeatResult(True, args.room, selected.number, "网页核验成功"),
+            )
         else:
             print("核验结果不明确：请在‘我的预约’页面手动确认，程序不会重复提交。")
+            send_preview_notification(
+                notifier,
+                args,
+                SeatResult(False, args.room, selected.number, "提交后核验结果不明确", conclusive=False),
+            )
         print(f"页面：{sanitize_url(page.url)}")
-        input("确认页面选择正确后按回车关闭预览：")
+        if not args.submit or args.confirm_submit:
+            input("确认页面选择正确后按回车关闭预览：")
         await context.close()
+
+
+def send_preview_notification(notifier, args, result) -> bool:
+    sent = send_reservation_notification(notifier, args.date, "手动", result, args.start, args.end)
+    if sent:
+        print("企业微信通知已发送。")
+    else:
+        print("企业微信通知未发送（未配置或发送失败）。")
+    return sent
 
 
 async def login_if_configured(page):
@@ -214,6 +269,93 @@ async def login_if_configured(page):
     await submit.click()
     await page.wait_for_url("**/libseat/**", timeout=30000)
     return True
+
+
+def request_token(url: str) -> str:
+    for key, values in parse_qs(urlsplit(url).query).items():
+        if key.lower() == "token" and values and values[0]:
+            return values[0]
+    return ""
+
+
+def record_api_auth(auth_state: dict, url: str, headers: dict[str, str]) -> None:
+    if "/rest/v2/" not in url:
+        return
+    filtered = browser_api_headers(headers)
+    token = request_token(url)
+    if filtered and auth_header_names(filtered):
+        auth_state["headers"] = filtered
+    if token:
+        auth_state["token"] = token
+
+
+async def capture_page_request(auth_state: dict, request) -> None:
+    if "/rest/v2/" not in request.url:
+        return
+    try:
+        headers = await request.all_headers()
+    except Exception:
+        return
+    record_api_auth(auth_state, request.url, headers)
+
+
+async def wait_for_api_auth(page, auth_state: dict, timeout_ms=5000) -> dict:
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    while asyncio.get_running_loop().time() < deadline:
+        headers = auth_state.get("headers") or {}
+        token = auth_state.get("token") or ""
+        if headers and token:
+            return {"headers": dict(headers), "token": token}
+        if page.is_closed():
+            break
+        await page.wait_for_timeout(100)
+    raise RuntimeError(
+        "未捕获座位系统 API 认证信息，无法读取当前预约；已停止。"
+        "请确认已完成登录并让网页先加载一次座位数据。"
+    )
+
+
+async def fetch_user_reservations(page, auth_state: dict) -> list[dict]:
+    auth = await wait_for_api_auth(page, auth_state)
+    endpoint = f"/rest/v2/user/reservations?token={quote(auth['token'], safe='')}"
+    payload = await page.evaluate(
+        """async ({endpoint, headers}) => {
+            const response = await fetch(endpoint, {
+                credentials: 'include',
+                cache: 'no-store',
+                headers,
+            });
+            const text = await response.text();
+            let body = {};
+            try { body = text ? JSON.parse(text) : {}; } catch (_) { body = {message: text}; }
+            return {status: response.status, body};
+        }""",
+        {"endpoint": endpoint, "headers": auth["headers"]},
+    )
+    if payload.get("status") != 200:
+        raise RuntimeError(f"读取当前预约失败：HTTP {payload.get('status')}")
+    body = payload.get("body") or {}
+    if body.get("code") not in (None, 0, "0"):
+        raise RuntimeError(f"读取当前预约失败：code={body.get('code')}，message={body.get('message') or '无'}")
+    data = body.get("data", [])
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        for key in ("reservations", "records", "rows", "list"):
+            if isinstance(data.get(key), list):
+                return [item for item in data[key] if isinstance(item, dict)]
+    return []
+
+
+def reservation_summary(item: dict) -> str:
+    location = str(item.get("location") or "").strip()
+    location_room = re.split(r"[，,]", location, maxsplit=1)[0].strip()
+    location_seat = re.search(r"(?:座位号|座位)\s*([0-9A-Za-z-]+)", location)
+    room = item.get("roomName") or item.get("room_name") or item.get("room") or location_room or "阅览室未知"
+    seat = item.get("seatNumber") or item.get("seatNo") or item.get("seat") or (location_seat.group(1) if location_seat else "座位未知")
+    start = item.get("startTime") or item.get("start_time") or item.get("beginTime") or item.get("begin") or "开始时间未知"
+    end = item.get("endTime") or item.get("end_time") or item.get("finishTime") or item.get("end") or "结束时间未知"
+    return f"{room}，座位 {seat}，{start}-{end}"
 
 
 async def select_library(page, name):
@@ -351,6 +493,68 @@ async def close_time_dialog(page):
     await page.wait_for_timeout(300)
 
 
+async def close_success_dialog(page, timeout_ms=5000):
+    """Close the post-submit success UI before navigating to reservations."""
+    success_pattern = re.compile("预约成功")
+    dialogs = page.locator(
+        ".el-message-box:visible, .el-dialog:visible, [role='dialog']:visible"
+    ).filter(has_text=success_pattern)
+    dialog = None
+    try:
+        await dialogs.first.wait_for(state="visible", timeout=timeout_ms)
+        dialog = dialogs.last
+    except Exception:
+        pass
+
+    if dialog is not None:
+        close_button = dialog.locator(".el-message-box__headerbtn, .el-dialog__headerbtn")
+        if await close_button.count() and await close_button.last.is_visible():
+            await close_button.last.click()
+        else:
+            action = dialog.get_by_role("button", name=re.compile("确定|关闭|我知道了|知道了|返回"))
+            if await action.count() == 0:
+                raise RuntimeError("检测到预约成功弹窗，但未找到可用的关闭按钮。")
+            await action.last.click()
+        try:
+            await dialog.wait_for(state="hidden", timeout=timeout_ms)
+        except Exception as exc:
+            raise RuntimeError("预约成功弹窗未能自动关闭，已停止后续核验。") from exc
+        return True
+
+    # Some deployments render the success view outside Element UI's standard
+    # dialog classes. Find a visible success marker, then use the global
+    # confirmation button exposed by that custom view.
+    marker = None
+    markers = page.get_by_text(success_pattern)
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    while asyncio.get_running_loop().time() < deadline:
+        for index in range(await markers.count()):
+            candidate = markers.nth(index)
+            if await candidate.is_visible():
+                marker = candidate
+                break
+        if marker is not None:
+            break
+        await page.wait_for_timeout(100)
+    if marker is None:
+        return False
+    actions = page.get_by_role("button", name=re.compile("确定|关闭|我知道了|知道了|返回"))
+    visible_action = None
+    for index in range(await actions.count()):
+        candidate = actions.nth(index)
+        if await candidate.is_visible():
+            visible_action = candidate
+            break
+    if visible_action is None:
+        raise RuntimeError("检测到预约成功提示，但未找到可用的关闭按钮。")
+    await visible_action.click()
+    try:
+        await marker.wait_for(state="hidden", timeout=timeout_ms)
+    except Exception as exc:
+        raise RuntimeError("预约成功弹窗未能自动关闭，已停止后续核验。") from exc
+    return True
+
+
 async def auth_diagnostics(page, request_headers):
     storage = await page.evaluate("""() => ({
         localStorage: Object.keys(localStorage),
@@ -383,5 +587,6 @@ if __name__ == "__main__":
     parser.add_argument("--start", required=True)
     parser.add_argument("--end", required=True)
     parser.add_argument("--preferred", nargs="*", default=[])
-    parser.add_argument("--submit", action="store_true", help="允许真实提交；仍需终端输入 SUBMIT")
+    parser.add_argument("--submit", action="store_true", help="允许真实提交；默认直接提交并自动核验")
+    parser.add_argument("--confirm-submit", action="store_true", help="调试护栏：与 --submit 一起使用时要求输入 SUBMIT")
     asyncio.run(main(parser.parse_args()))

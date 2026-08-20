@@ -1,5 +1,14 @@
-def confirmation_required(submit_flag: bool, phrase: str) -> bool:
-    return not submit_flag or phrase.strip() != "SUBMIT"
+import re
+
+
+_CLOCK_RE = re.compile(r"(?<!\d)(\d{1,2}):([0-5]\d)(?!\d)")
+_DATE_RE = re.compile(r"\d{4}-\d{1,2}-\d{1,2}")
+
+
+def confirmation_required(submit_flag: bool, confirm_flag: bool, phrase: str) -> bool:
+    if not submit_flag:
+        return True
+    return confirm_flag and phrase.strip() != "SUBMIT"
 
 
 def reservation_matches(text: str, day: str, room: str, seat: str, start: str, end: str) -> bool:
@@ -9,6 +18,93 @@ def reservation_matches(text: str, day: str, room: str, seat: str, start: str, e
 
 def submission_settled(text: str) -> bool:
     return "正在玩命预约中" not in text and "玩命预约" not in text
+
+
+def find_similar_reservation(
+    reservations: list[dict],
+    day: str,
+    room: str,
+    start: str,
+    end: str,
+    min_overlap: float = 0.75,
+) -> dict | None:
+    """Return an existing reservation covering most of the requested interval."""
+    requested_start = _clock_minutes(start)
+    requested_end = _clock_minutes(end)
+    if requested_start is None or requested_end is None or requested_end <= requested_start:
+        return None
+    requested_duration = requested_end - requested_start
+    requested_room = _normalize_room(room)
+    for item in reservations or []:
+        if not isinstance(item, dict) or _extract_date(item) != day:
+            continue
+        existing_room = _extract_room(item)
+        if existing_room and requested_room and not _room_matches(existing_room, requested_room):
+            continue
+        existing_start = _extract_time(item, ("startTime", "start_time", "start", "beginTime", "begin"))
+        existing_end = _extract_time(item, ("endTime", "end_time", "end", "finishTime", "finish"))
+        if existing_start is None or existing_end is None or existing_end <= existing_start:
+            continue
+        overlap = max(0, min(requested_end, existing_end) - max(requested_start, existing_start))
+        if overlap / requested_duration >= min_overlap:
+            return item
+    return None
+
+
+def _extract_date(item: dict) -> str | None:
+    for key in ("date", "day", "onDate", "reservationDate", "reserveDate"):
+        value = _value_text(item.get(key))
+        match = _DATE_RE.search(value)
+        if match:
+            return match.group(0)
+    for key in ("startTime", "start_time", "start", "beginTime", "begin"):
+        value = _value_text(item.get(key))
+        match = _DATE_RE.search(value)
+        if match:
+            return match.group(0)
+    return None
+
+
+def _extract_room(item: dict) -> str:
+    for key in ("roomName", "room_name", "readingRoomName", "room", "readingRoom", "location"):
+        value = item.get(key)
+        if isinstance(value, dict):
+            value = value.get("name") or value.get("title") or value.get("text")
+        normalized = _normalize_room(_value_text(value))
+        if normalized:
+            return normalized
+    return ""
+
+
+def _room_matches(existing: str, requested: str) -> bool:
+    """Match a room name embedded in the site's combined location field."""
+    return existing == requested or requested in existing
+
+
+def _extract_time(item: dict, keys: tuple[str, ...]) -> int | None:
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, (int, float)) and 0 <= value < 24 * 60:
+            return int(value)
+        match = _CLOCK_RE.search(_value_text(value))
+        if match:
+            return int(match.group(1)) * 60 + int(match.group(2))
+    return None
+
+
+def _clock_minutes(value: str) -> int | None:
+    match = _CLOCK_RE.search(_value_text(value))
+    if not match:
+        return None
+    return int(match.group(1)) * 60 + int(match.group(2))
+
+
+def _value_text(value) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _normalize_room(value: str) -> str:
+    return "".join(_value_text(value).split())
 
 
 def requested_times_available(options: list[str], requested: list[str]) -> bool:

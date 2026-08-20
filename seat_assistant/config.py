@@ -29,6 +29,7 @@ class Settings:
     dry_run: bool = True
     db_path: str = "seat_assistant.db"
     control_host: str = "127.0.0.1"
+    wecom_webhook: str = ""
     login_url: str = "https://seatlib.hpu.edu.cn/libseat/"
     periods: dict[str, Period] = field(default_factory=lambda: {
         "morning": Period(("08:30", "09:30"), ("11:30", "13:00"), "08:55"),
@@ -50,5 +51,6 @@ def load_settings() -> Settings:
         dry_run=os.getenv("SEAT_DRY_RUN", "true").lower() != "false",
         db_path=os.getenv("SEAT_DB_PATH", "seat_assistant.db"),
         control_host=os.getenv("SEAT_CONTROL_HOST", "127.0.0.1"),
+        wecom_webhook=os.getenv("SEAT_WECOM_WEBHOOK", ""),
         login_url=os.getenv("SEAT_LOGIN_URL", "https://seatlib.hpu.edu.cn/libseat/"),
     )

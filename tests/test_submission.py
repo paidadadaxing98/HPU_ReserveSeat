@@ -1,10 +1,11 @@
-from seat_assistant.submission import confirmation_required, end_time_response_matches_start, end_times_request_url, end_times_response_matches, normalize_time_option, reservation_matches, requested_times_available, submission_settled, time_option_id, time_options, time_to_minutes, time_values
+from seat_assistant.submission import confirmation_required, end_time_response_matches_start, end_times_request_url, end_times_response_matches, find_similar_reservation, normalize_time_option, reservation_matches, requested_times_available, submission_settled, time_option_id, time_options, time_to_minutes, time_values
 
 
-def test_submission_requires_explicit_flag_and_phrase():
-    assert confirmation_required(False, "SUBMIT")
-    assert confirmation_required(True, "submit")
-    assert not confirmation_required(True, "SUBMIT")
+def test_submission_only_prompts_for_explicit_debug_confirmation():
+    assert confirmation_required(False, False, "SUBMIT")
+    assert not confirmation_required(True, False, "")
+    assert confirmation_required(True, True, "submit")
+    assert not confirmation_required(True, True, "SUBMIT")
 
 
 def test_reservation_matches_expected_fields():
@@ -61,3 +62,63 @@ def test_end_time_response_must_match_selected_start_id_not_just_endpoint():
     selected = "https://seatlib.hpu.edu.cn/rest/v2/endTimesForSeat/20008/2026-08-20/570?id=20008&date=2026-08-20&start=570"
     assert not end_time_response_matches_start(initial, "570")
     assert end_time_response_matches_start(selected, "570")
+
+
+def test_find_similar_reservation_accepts_75_percent_time_overlap():
+    reservations = [{
+        "date": "2026-08-20",
+        "roomName": "4层计算机类借阅区",
+        "startTime": "15:30",
+        "endTime": "17:30",
+        "seatNumber": "169",
+    }]
+
+    matched = find_similar_reservation(
+        reservations,
+        "2026-08-20",
+        "4层计算机类借阅区",
+        "15:00",
+        "17:00",
+    )
+
+    assert matched == reservations[0]
+
+
+def test_find_similar_reservation_rejects_low_overlap_or_other_room():
+    reservation = {
+        "date": "2026-08-20",
+        "roomName": "4层计算机类借阅区",
+        "startTime": "16:00",
+        "endTime": "18:00",
+    }
+    assert find_similar_reservation([reservation], "2026-08-20", "4层计算机类借阅区", "15:00", "17:00") is None
+
+    other_room = {**reservation, "roomName": "3层社会科学阅览区", "startTime": "15:00", "endTime": "17:00"}
+    assert find_similar_reservation([other_room], "2026-08-20", "4层计算机类借阅区", "15:00", "17:00") is None
+
+
+def test_find_similar_reservation_ignores_unparseable_or_other_date_records():
+    reservations = [
+        {"date": "2026-08-19", "startTime": "15:00", "endTime": "17:00"},
+        {"date": "2026-08-20", "roomName": "4层计算机类借阅区", "startTime": "待定", "endTime": "待定"},
+    ]
+
+    assert find_similar_reservation(reservations, "2026-08-20", "4层计算机类借阅区", "15:00", "17:00") is None
+
+
+def test_find_similar_reservation_reads_live_api_fields_and_combined_location():
+    reservation = {
+        "onDate": "2026-08-20",
+        "location": "南校区第二图书馆4层4层计算机类 借阅区，座位号169",
+        "begin": "15:00",
+        "end": "17:00",
+        "status": "RESERVE",
+    }
+
+    assert find_similar_reservation(
+        [reservation],
+        "2026-08-20",
+        "4层计算机类借阅区",
+        "15:00",
+        "17:00",
+    ) == reservation

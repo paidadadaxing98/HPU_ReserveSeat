@@ -1,4 +1,5 @@
 from .config import load_settings
+from .notifications import WeComNotifier
 from .reservation import DryRunReservation, PlaywrightReservation
 from .service import AssistantService
 from .storage import Repository
@@ -7,7 +8,8 @@ from .storage import Repository
 def build_service():
     settings = load_settings()
     adapter = DryRunReservation() if settings.dry_run else PlaywrightReservation()
-    return settings, AssistantService(settings, Repository(settings.db_path), adapter)
+    notifier = WeComNotifier(settings.wecom_webhook)
+    return settings, AssistantService(settings, Repository(settings.db_path), adapter, notifier)
 
 
 if __name__ == "__main__":

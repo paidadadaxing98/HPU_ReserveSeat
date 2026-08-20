@@ -93,3 +93,56 @@ def test_record_arrival_is_persisted_without_changing_reservation(tmp_path):
 
     assert result["ok"] is True
     assert repo.events("arrival", "morning") == ["09:05"]
+
+
+class RecordingNotifier:
+    def __init__(self, error=None):
+        self.messages = []
+        self.error = error
+
+    def send(self, text):
+        self.messages.append(text)
+        if self.error:
+            raise self.error
+        return True
+
+
+def test_reserve_period_notifies_success_after_persisting_result(tmp_path):
+    notifier = RecordingNotifier()
+    service, repo = make_service(tmp_path)
+    service.notifier = notifier
+
+    result = service.reserve_period("2026-08-21", "morning")
+
+    assert result.success is True
+    assert len(notifier.messages) == 1
+    assert "2026-08-21" in notifier.messages[0]
+    assert "169" in notifier.messages[0]
+    assert repo.get_reservation("2026-08-21", "morning")["status"] == "reserved"
+
+
+def test_reserve_period_notifies_uncertain_result_without_changing_it(tmp_path):
+    notifier = RecordingNotifier()
+    service, repo = make_service(
+        tmp_path,
+        FakeAdapter(reserve_results=[SeatResult(False, message="timeout", conclusive=False)]),
+    )
+    service.notifier = notifier
+
+    result = service.reserve_period("2026-08-21", "morning")
+
+    assert result.success is False
+    assert len(notifier.messages) == 1
+    assert "结果不明确" in notifier.messages[0]
+    assert repo.get_reservation("2026-08-21", "morning")["status"] == "uncertain"
+
+
+def test_notification_failure_does_not_change_reservation_result(tmp_path):
+    notifier = RecordingNotifier(RuntimeError("network down"))
+    service, repo = make_service(tmp_path)
+    service.notifier = notifier
+
+    result = service.reserve_period("2026-08-21", "morning")
+
+    assert result.success is True
+    assert repo.get_reservation("2026-08-21", "morning")["status"] == "reserved"

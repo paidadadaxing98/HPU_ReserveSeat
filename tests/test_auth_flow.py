@@ -1,5 +1,6 @@
 import seat_assistant.auth_flow as auth_flow
-from seat_assistant.auth_flow import api_auth_headers, auth_header_names, captcha_input_selectors, credentials_available, is_seat_app_url, is_cas_url, library_selected, normalize_library
+from seat_assistant.auth_flow import api_auth_headers, auth_header_names, browser_api_headers, captcha_input_selectors, credentials_available, is_seat_app_url, is_cas_url, library_selected, normalize_library
+from scripts.preview_reservation import record_api_auth, request_token
 
 
 def test_blank_credentials_fall_back_to_existing_session():
@@ -44,6 +45,25 @@ def test_api_auth_headers_keep_credentials_but_drop_transport_headers():
     assert "content-length" not in headers
 
 
+def test_browser_api_headers_drop_browser_forbidden_headers_but_keep_custom_auth():
+    headers = browser_api_headers({
+        "authorization": "Bearer secret",
+        "x-hmac-request-key": "hmac-secret",
+        "x-request-date": "2026-08-20T00:00:00Z",
+        "cookie": "session=secret",
+        "host": "seatlib.hpu.edu.cn",
+        "referer": "https://seatlib.hpu.edu.cn/libseat/",
+        "user-agent": "browser",
+    })
+    assert headers["authorization"] == "Bearer secret"
+    assert headers["x-hmac-request-key"] == "hmac-secret"
+    assert headers["x-request-date"] == "2026-08-20T00:00:00Z"
+    assert "cookie" not in headers
+    assert "host" not in headers
+    assert "referer" not in headers
+    assert "user-agent" not in headers
+
+
 def test_auth_header_names_are_redacted_and_focus_on_auth_fields():
     assert auth_header_names({"Authorization": "secret", "token": "secret", "accept": "json"}) == ["authorization", "token"]
 
@@ -58,3 +78,30 @@ def test_end_time_request_variants_preserve_custom_token_header():
 def test_library_selected_ignores_spacing_but_not_different_library():
     assert library_selected("南校区 第二图书馆", "南校区第二图书馆")
     assert not library_selected("南校区第一图书馆", "南校区第二图书馆")
+
+
+def test_request_token_is_case_insensitive_and_decoded():
+    assert request_token("https://seatlib.hpu.edu.cn/rest/v2/layout?ToKeN=a%2Bb") == "a+b"
+    assert request_token("https://seatlib.hpu.edu.cn/rest/v2/layout") == ""
+
+
+def test_record_api_auth_keeps_only_replayable_rest_authentication():
+    state = {"headers": {}, "token": ""}
+    record_api_auth(
+        state,
+        "https://seatlib.hpu.edu.cn/rest/v2/layout?token=page-token",
+        {
+            "Authorization": "Bearer secret",
+            "X-Hmac-Request-Key": "hmac-secret",
+            "Cookie": "session=secret",
+            "Host": "seatlib.hpu.edu.cn",
+        },
+    )
+    assert state["token"] == "page-token"
+    assert state["headers"]["Authorization"] == "Bearer secret"
+    assert "Cookie" not in state["headers"]
+    assert "Host" not in state["headers"]
+
+    unchanged = dict(state)
+    record_api_auth(state, "https://seatlib.hpu.edu.cn/static/app.js?token=wrong", {"Authorization": "wrong"})
+    assert state == unchanged
