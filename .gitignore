@@ -9,3 +9,4 @@ site-inspection.json
 产品期望.md
 __pycache__/
 .pytest_cache/
+.pytest-tmp/

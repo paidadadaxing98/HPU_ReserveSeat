@@ -3,6 +3,19 @@ import re
 
 _CLOCK_RE = re.compile(r"(?<!\d)(\d{1,2}):([0-5]\d)(?!\d)")
 _DATE_RE = re.compile(r"\d{4}-\d{1,2}-\d{1,2}")
+_ACTIVE_RESERVATION_STATUSES = frozenset({
+    "ACTIVE",
+    "BOOKED",
+    "CONFIRMED",
+    "IN_USE",
+    "RESERVE",
+    "RESERVED",
+    "USING",
+    "VALID",
+    "已预约",
+    "预约中",
+    "生效",
+})
 
 
 def confirmation_required(submit_flag: bool, confirm_flag: bool, phrase: str) -> bool:
@@ -38,6 +51,8 @@ def find_similar_reservation(
     for item in reservations or []:
         if not isinstance(item, dict) or _extract_date(item) != day:
             continue
+        if not _is_active_reservation(item):
+            continue
         existing_room = _extract_room(item)
         if existing_room and requested_room and not _room_matches(existing_room, requested_room):
             continue
@@ -49,6 +64,19 @@ def find_similar_reservation(
         if overlap / requested_duration >= min_overlap:
             return item
     return None
+
+
+def _is_active_reservation(item: dict) -> bool:
+    """Only reuse records whose API status explicitly says they are active."""
+    for key in ("status", "state", "reservationStatus", "reserveStatus", "bookingStatus"):
+        if key not in item:
+            continue
+        value = item.get(key)
+        if isinstance(value, dict):
+            value = value.get("code") or value.get("name") or value.get("value") or value.get("status")
+        normalized = _value_text(value).strip().upper()
+        return normalized in _ACTIVE_RESERVATION_STATUSES
+    return False
 
 
 def _extract_date(item: dict) -> str | None:

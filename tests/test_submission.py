@@ -71,6 +71,7 @@ def test_find_similar_reservation_accepts_75_percent_time_overlap():
         "startTime": "15:30",
         "endTime": "17:30",
         "seatNumber": "169",
+        "status": "RESERVE",
     }]
 
     matched = find_similar_reservation(
@@ -122,3 +123,38 @@ def test_find_similar_reservation_reads_live_api_fields_and_combined_location():
         "15:00",
         "17:00",
     ) == reservation
+
+
+def test_find_similar_reservation_ignores_cancelled_or_expired_records():
+    base = {
+        "onDate": "2026-08-20",
+        "location": "南校区第二图书馆4层4层计算机类借阅区，座位号169",
+        "begin": "15:00",
+        "end": "17:00",
+    }
+
+    for status in ("CANCEL", "CANCELLED", "EXPIRED", "COMPLETED", "RELEASED"):
+        assert find_similar_reservation(
+            [{**base, "status": status}],
+            "2026-08-20",
+            "4层计算机类借阅区",
+            "15:00",
+            "17:00",
+        ) is None
+
+
+def test_find_similar_reservation_requires_an_explicit_active_status():
+    reservation = {
+        "onDate": "2026-08-20",
+        "location": "南校区第二图书馆4层4层计算机类借阅区，座位号169",
+        "begin": "15:00",
+        "end": "17:00",
+    }
+
+    assert find_similar_reservation(
+        [reservation],
+        "2026-08-20",
+        "4层计算机类借阅区",
+        "15:00",
+        "17:00",
+    ) is None
