@@ -25,7 +25,7 @@ from seat_assistant.notifications import WeComNotifier, send_initialization_noti
 from seat_assistant.storage import Repository
 from scripts.preview_reservation import (
     capture_page_request,
-    fetch_user_reservations,
+    fetch_user_reservations_with_capabilities,
     login_if_configured,
     visible_room_names,
     wait_for_authenticated_page,
@@ -59,16 +59,12 @@ class ReadOnlyAccountVerifier:
             print("当前可选阅览室：" + ("、".join(rooms) if rooms else "未读取到"))
             # The homepage normally loads both reservation endpoints. Calling
             # the read-only helper directly also verifies captured auth data.
-            reservations = await fetch_user_reservations(page, auth_state)
+            reservations, capabilities = await fetch_user_reservations_with_capabilities(page, auth_state)
             return {
                 "login": True,
                 "home": is_seat_app_url(page.url),
-                "my_reservations": isinstance(reservations, list),
-                "capabilities": {
-                    "my_reservations": True,
-                    "history": True,
-                    "current_reservations": True,
-                },
+                "my_reservations": capabilities["my_reservations"],
+                "capabilities": capabilities,
                 "reservation_count": len(reservations),
                 "library_catalog": libraries,
                 "seat_catalog": rooms,

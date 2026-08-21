@@ -37,6 +37,8 @@ PROFILE = Path(".browser-profile").resolve()
 
 async def main(args):
     _load_dotenv()
+    interactive = getattr(args, "interactive", True)
+    record_success_quota = getattr(args, "record_success_quota", True)
     account_settings = load_account_settings(args.account)
     if not args.preferred:
         args.preferred = list(account_settings.preferred_seats)
@@ -77,8 +79,10 @@ async def main(args):
                     await page.goto(account_settings.login_url, wait_until="domcontentloaded")
                     logged_in = await login_if_configured(page, account_settings)
                 if not logged_in:
+                    if not interactive:
+                        raise RuntimeError("未能自动登录，已停止无人值守预约")
                     print("第 1 步（手动）：请完成登录，直到进入‘自选座位’首页。")
-                    input("登录完成后按回车：")
+                    pause_for_manual_interaction("登录完成后按回车：", interactive=interactive)
             print("正在确认进入座位预约首页……")
             await page.wait_for_url("**/libseat/**", timeout=30000)
             print(f"程序操作：自动选择图书馆‘{args.location['library']}’。")
@@ -139,7 +143,7 @@ async def main(args):
         except Exception as exc:
             print(f"流程暂停：{exc}")
             print(f"浏览器当前页面：{sanitize_url(page.url)}")
-            input("请检查浏览器页面；确认后按回车关闭浏览器：")
+            pause_for_manual_interaction("请检查浏览器页面；确认后按回车关闭浏览器：", interactive=interactive)
             return
         body = await response.json()
         print(f"座位布局接口：HTTP {response.status}，code={body.get('code')}，message={body.get('message')}")
@@ -245,11 +249,11 @@ async def main(args):
             await close_time_dialog(page)
             await context.close()
             return
-        phrase = input("当前页面已选好座位和时间。输入 SUBMIT 才会提交，直接回车保持预览：") if args.confirm_submit else ""
+        phrase = input("当前页面已选好座位和时间。输入 SUBMIT 才会提交，直接回车保持预览：") if args.confirm_submit and interactive else ""
         if confirmation_required(args.submit, args.confirm_submit, phrase):
             print("预览已完成：页面停在‘立即预约’前。没有提交预约。")
             print(f"页面：{sanitize_url(page.url)}")
-            input("确认页面选择正确后按回车关闭预览：")
+            pause_for_manual_interaction("确认页面选择正确后按回车关闭预览：", interactive=interactive)
             await context.close()
             return
         print("正在提交一次真实预约……")
@@ -267,7 +271,7 @@ async def main(args):
                 args,
                 SeatResult(False, args.room, selected.number, "提交请求超过 30 秒仍未结束", conclusive=False),
             )
-            input("请在浏览器中检查状态后按回车关闭：")
+            pause_for_manual_interaction("请在浏览器中检查状态后按回车关闭：", interactive=interactive)
             await context.close()
             return
         await page.wait_for_timeout(1000)
@@ -292,7 +296,8 @@ async def main(args):
             existing, submission_signal=submission_signal,
         )
         if verification_status == "success":
-            repository.record_successful_booking(date.today().isoformat(), f"{args.date}:{selected.number}:{uuid.uuid4().hex}")
+            if record_success_quota:
+                repository.record_successful_booking(date.today().isoformat(), f"{args.date}:{selected.number}:{uuid.uuid4().hex}")
             repository.save_reservation(args.date, "manual", "reserved", args.start, args.end, args.room, selected.number, verification_message)
             print(f"核验成功：{args.date}，{args.room}，座位 {selected.number}，{args.start}-{args.end}")
             send_preview_notification(
@@ -325,7 +330,7 @@ async def main(args):
             )
         print(f"页面：{sanitize_url(page.url)}")
         if not args.submit or args.confirm_submit:
-            input("确认页面选择正确后按回车关闭预览：")
+            pause_for_manual_interaction("确认页面选择正确后按回车关闭预览：", interactive=interactive)
         await context.close()
 
 
@@ -342,6 +347,8 @@ async def run_scheduled_reservation(settings, day: str, period: str, start: str,
         period=period,
         submit=True,
         confirm_submit=False,
+        interactive=False,
+        record_success_quota=False,
     )
     repository = Repository(str(settings.db_path), settings.account_id)
     try:
@@ -369,6 +376,15 @@ def send_preview_notification(notifier, args, result) -> bool:
     else:
         print("企业微信通知未发送（未配置或发送失败）。")
     return sent
+
+
+def pause_for_manual_interaction(message: str, interactive: bool = True) -> bool:
+    """Pause only for a human when the caller explicitly allows interaction."""
+    if not interactive:
+        print(f"无人值守模式：{message} 已停止等待人工操作。")
+        return False
+    input(message)
+    return True
 
 
 async def visible_room_names(page) -> list[str]:
@@ -623,25 +639,41 @@ async def wait_for_api_auth(page, auth_state: dict, timeout_ms=5000) -> dict:
 
 
 async def fetch_user_reservations(page, auth_state: dict) -> list[dict]:
+    records, _ = await fetch_user_reservations_with_capabilities(page, auth_state)
+    return records
+
+
+async def fetch_user_reservations_with_capabilities(page, auth_state: dict) -> tuple[list[dict], dict[str, bool]]:
+    """Read both reservation endpoints and retain the result of each probe."""
     auth = await wait_for_api_auth(page, auth_state)
     history_error = None
     current_error = None
+    capabilities = {
+        "history": False,
+        "current_reservations": False,
+        "my_reservations": False,
+    }
     try:
         history = await fetch_reservation_history(page, auth)
+        capabilities["history"] = True
     except RuntimeError as exc:
         history = []
         history_error = str(exc)
     try:
         current = await fetch_current_reservations(page, auth)
+        capabilities["current_reservations"] = True
     except RuntimeError as exc:
         current = []
         current_error = str(exc)
+    # The web client's “我的预约” view is backed by the history endpoint;
+    # keep that capability distinct from the lighter current-reservation poll.
+    capabilities["my_reservations"] = capabilities["history"]
     if history_error and current_error:
         raise RuntimeError(
             "无法读取预约历史或当前预约，已停止："
             f"历史接口：{history_error}；当前预约接口：{current_error}"
         )
-    return unique_reservation_records(history + current)
+    return unique_reservation_records(history + current), capabilities
 
 
 async def fetch_reservation_history(page, auth: dict) -> list[dict]:

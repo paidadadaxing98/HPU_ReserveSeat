@@ -75,6 +75,21 @@ def test_load_accounts_defaults_to_legacy_single_account(monkeypatch, tmp_path):
     assert accounts[0].db_path == (tmp_path / "seat_assistant.db").resolve()
 
 
+def test_legacy_single_account_does_not_require_initialization(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SEAT_ACCOUNT", "student-a")
+    monkeypatch.setenv("SEAT_PASSWORD", "secret")
+
+    settings = load_account_settings()
+
+    assert settings.require_initialization is False
+    assert settings.location_preference == {
+        "library": "南校区第二图书馆",
+        "floor": "",
+        "room": "",
+    }
+
+
 def test_load_accounts_reads_json_and_derives_isolated_paths(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "accounts.json").write_text(json.dumps({

@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 from seat_assistant.reservation import SeatResult
-from scripts.preview_reservation import close_success_dialog, daily_reservation_details, fetch_post_submit_reservations, fetch_user_reservations, reservation_summary, reservation_verification_delay, reservation_verification_status, send_preview_notification, submission_notice
+from scripts.preview_reservation import close_success_dialog, daily_reservation_details, fetch_post_submit_reservations, fetch_user_reservations, fetch_user_reservations_with_capabilities, pause_for_manual_interaction, reservation_summary, reservation_verification_delay, reservation_verification_status, send_preview_notification, submission_notice
 
 
 def test_preview_notification_uses_manual_booking_context():
@@ -175,6 +175,62 @@ def test_fetch_user_reservations_falls_back_to_current_endpoint():
         "/rest/v2/history/1/100?token=token",
         "/rest/v2/user/reservations?token=token",
     ]
+
+
+def test_fetch_user_reservations_reports_each_interface_capability():
+    record = {"date": "2026-08-20", "begin": "20:00", "end": "21:00", "stat": "RESERVE"}
+
+    class Page:
+        async def evaluate(self, script, payload):
+            endpoint = payload["endpoint"]
+            if "/history/" in endpoint:
+                return {"status": 404, "body": {"code": 404, "message": "history unavailable"}}
+            return {"status": 200, "body": {"code": 0, "data": [record]}}
+
+        def is_closed(self):
+            return False
+
+    records, capabilities = asyncio.run(fetch_user_reservations_with_capabilities(
+        Page(), {"headers": {"authorization": "x"}, "token": "token"}
+    ))
+
+    assert records == [record]
+    assert capabilities == {
+        "history": False,
+        "current_reservations": True,
+        "my_reservations": False,
+    }
+
+
+def test_unattended_reservation_never_waits_for_manual_input(monkeypatch):
+    def fail_input(_):
+        raise AssertionError("unattended flow must not call input")
+
+    monkeypatch.setattr("builtins.input", fail_input)
+    pause_for_manual_interaction("should not pause", interactive=False)
+
+
+def test_scheduled_reservation_disables_interaction_and_script_quota_recording(monkeypatch, tmp_path):
+    import scripts.preview_reservation as preview
+    from seat_assistant.storage import Repository
+
+    captured = []
+
+    async def fake_main(args):
+        captured.append(args)
+        Repository(str(tmp_path / "account.sqlite"), args.account).save_reservation(
+            args.date, "manual", "reserved", args.start, args.end, "阅览室", "169", "已核验"
+        )
+
+    monkeypatch.setattr(preview, "main", fake_main)
+    settings = SimpleNamespace(account_id="alice", db_path=str(tmp_path / "account.sqlite"))
+
+    result = asyncio.run(preview.run_scheduled_reservation(settings, "2026-08-21", "morning", "08:30", "12:00"))
+
+    assert result.success is True
+    assert captured[0].interactive is False
+    assert captured[0].record_success_quota is False
+    assert Repository(str(tmp_path / "account.sqlite"), "alice").successful_booking_count("2026-08-21") == 0
 
 
 def test_post_submit_poll_reads_only_current_reservations_endpoint():

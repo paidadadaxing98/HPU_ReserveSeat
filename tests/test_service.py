@@ -231,6 +231,17 @@ def test_reusing_existing_booking_is_allowed_when_success_quota_is_full(tmp_path
     assert len(adapter.reserve_calls) == 1
 
 
+def test_scheduler_success_quota_is_recorded_by_service_only(tmp_path):
+    adapter = FakeAdapter()
+    repo = Repository(str(tmp_path / "db.sqlite"), account_id="alice")
+    service = AssistantService(Settings(control_token="local-token"), repo, adapter)
+
+    result = service.reserve_period("2026-08-21", "morning", quota_day="2026-08-21")
+
+    assert result.success is True
+    assert repo.successful_booking_count("2026-08-21") == 1
+
+
 def test_uninitialized_delay_does_not_cancel_existing_reservation(tmp_path):
     adapter = FakeAdapter()
     settings = Settings(account_id="alice", control_token="local-token", require_initialization=True)

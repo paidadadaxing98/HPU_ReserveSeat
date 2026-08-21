@@ -223,6 +223,11 @@ def load_accounts(path: str | None = None) -> list[AccountSettings]:
             db_path=Path(os.getenv("SEAT_DB_PATH", "seat_assistant.db")).resolve(),
             wecom_webhook=os.getenv("SEAT_WECOM_WEBHOOK", "").strip(),
             login_url=os.getenv("SEAT_LOGIN_URL", "https://seatlib.hpu.edu.cn/libseat/"),
+            location_preference={
+                "library": "南校区第二图书馆",
+                "floor": "",
+                "room": "",
+            },
         )]
     try:
         raw = json.loads(config_path.read_text(encoding="utf-8"))
@@ -326,7 +331,8 @@ def load_settings() -> Settings:
 
 def load_account_settings(account_id: str | None = None) -> Settings:
     base = load_settings()
-    accounts = load_accounts()
+    config_path = Path(os.getenv("SEAT_ACCOUNTS_FILE", "accounts.json")).resolve()
+    accounts = load_accounts(str(config_path))
     if account_id is None:
         if len(accounts) != 1:
             raise ValueError("配置了多个账号，请使用 --account 指定账号 ID")
@@ -359,5 +365,5 @@ def load_account_settings(account_id: str | None = None) -> Settings:
         preferred_seats=selected.preferred_seats,
         seat_preference=dict(selected.seat_preference),
         location_preference=dict(selected.location_preference),
-        require_initialization=True,
+        require_initialization=config_path.exists(),
     )
