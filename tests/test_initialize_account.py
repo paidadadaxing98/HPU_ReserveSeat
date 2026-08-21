@@ -192,6 +192,39 @@ def test_initialize_workflow_fails_when_library_catalog_is_missing(tmp_path):
     assert "图书馆" in result["message"]
 
 
+def test_initialize_stops_before_resolving_rules_when_room_catalog_collection_failed(tmp_path):
+    config_path = tmp_path / "accounts.json"
+    config_path.write_text(
+        '{"accounts":[{"id":"alice","enabled":true,"account":"1001",'
+        '"password":"secret"}]}',
+        encoding="utf-8",
+    )
+
+    class FakeVerifier:
+        async def verify(self):
+            return {
+                "home": True,
+                "my_reservations": True,
+                "capabilities": {"history": True},
+                "library_catalog": ["南校区第一图书馆", "南校区第二图书馆"],
+                "rooms_by_library": {"南校区第一图书馆": ["一层自习室"]},
+                "catalog_errors": {"南校区第二图书馆": "阅览室下拉项无法点击"},
+            }
+
+    result = asyncio.run(run_interactive_initialization(
+        account_id="alice",
+        settings=Settings(control_token="local-token", db_path=str(tmp_path / "alice.sqlite")),
+        config_path=config_path,
+        verifier=FakeVerifier(),
+        seat_rule_values=["2-10-23"],
+        output_fn=lambda _: None,
+    ))
+
+    assert result["status"] == "failed"
+    assert "南校区第二图书馆" in result["message"]
+    assert "阅览室下拉项无法点击" in result["message"]
+
+
 def test_initialize_workflow_records_failed_state_when_read_only_verification_raises(tmp_path):
     config_path = tmp_path / "accounts.json"
     config_path.write_text(

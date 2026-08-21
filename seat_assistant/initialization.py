@@ -363,6 +363,23 @@ async def run_interactive_initialization(
         )
         output_fn(f"账号 {account_id} 初始化失败：{message}")
         return repository.initialization_state()
+    catalog_errors = verification.get("catalog_errors") or {}
+    if catalog_errors:
+        details = "；".join(
+            f"{library}：{error}"
+            for library, error in catalog_errors.items()
+        )
+        message = f"阅览室目录采集失败，未保存初始化配置：{details}"
+        repository.save_initialization_state(
+            status="failed",
+            login_verified=bool(verification.get("login", False)),
+            home_verified=bool(verification.get("home", False)),
+            my_reservations_verified=bool(verification.get("my_reservations", False)),
+            capabilities=verification.get("capabilities", {}),
+            message=message,
+        )
+        output_fn(f"账号 {account_id} 初始化失败：{message}")
+        return repository.initialization_state()
     rooms_by_library = verification.get("rooms_by_library") or {}
     if seat_rule_values:
         raw_rules = sort_seat_rules([parse_seat_rule(value) for value in seat_rule_values])

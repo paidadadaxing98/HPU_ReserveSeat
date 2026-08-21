@@ -59,6 +59,7 @@ class ReadOnlyAccountVerifier:
             libraries = await visible_library_names(page)
             print("当前可选图书馆：" + ("、".join(libraries) if libraries else "未读取到"))
             rooms_by_library = {}
+            catalog_errors = {}
             for library in libraries:
                 try:
                     await select_library(page, library)
@@ -67,6 +68,7 @@ class ReadOnlyAccountVerifier:
                 except Exception as exc:
                     print(f"读取图书馆‘{library}’的阅览室失败：{exc}")
                     rooms_by_library[library] = []
+                    catalog_errors[library] = str(exc) or "未知错误"
             rooms = rooms_by_library.get(libraries[0], []) if libraries else []
             print("当前可选阅览室：" + ("、".join(rooms) if rooms else "未读取到"))
             # The homepage normally loads both reservation endpoints. Calling
@@ -81,6 +83,7 @@ class ReadOnlyAccountVerifier:
                 "library_catalog": libraries,
                 "seat_catalog": rooms,
                 "rooms_by_library": rooms_by_library,
+                "catalog_errors": catalog_errors,
             }
 
 

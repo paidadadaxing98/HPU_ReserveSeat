@@ -36,6 +36,22 @@ def test_preview_candidates_preserve_preference_then_add_other_free_seats():
     assert [seat.number for seat in preview_seat_candidates(seats, ["168", "170"])] == ["168", "001", "169"]
 
 
+def test_preview_candidates_match_zero_padded_page_numbers():
+    seats = [Seat("001", True, 10), Seat("023", True, 11)]
+
+    assert [seat.number for seat in preview_seat_candidates(seats, ["23"])] == ["023", "001"]
+
+
+def test_time_compatible_selection_accepts_unpadded_time_option_keys():
+    seats = [Seat("023", True, 11)]
+    options = {"23": (["09:00"], ["12:00"])}
+
+    selected = first_time_compatible_seat(seats, ["23"], options, "09:00", "12:00")
+
+    assert selected is not None
+    assert selected.number == "023"
+
+
 def test_layout_request_matches_room_layout_response():
     assert layout_request_matches("https://seatlib.hpu.edu.cn/rest/v2/room/layoutByDate/34/2026-08-20", "2026-08-20")
     assert layout_request_matches("https://seatlib.hpu.edu.cn/rest/v2/room/layoutByDate/34/2026-08-19")

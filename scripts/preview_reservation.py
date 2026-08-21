@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 from seat_assistant.calibration import sanitize_url
 from seat_assistant.account_lock import AccountLock
 from seat_assistant.browser_session import LockedBrowser
-from seat_assistant.auth_flow import auth_header_names, browser_api_headers, captcha_image_selectors, captcha_input_selectors, captcha_kind_from_text, credentials_available, is_seat_app_url, library_selected, login_failure_message, normalize_library
+from seat_assistant.auth_flow import auth_header_names, browser_api_headers, captcha_image_selectors, captcha_input_selectors, captcha_kind_from_text, credentials_available, is_captcha_failure_message, is_seat_app_url, library_selected, login_failure_message, normalize_library
 from seat_assistant.captcha_llm import CaptchaVisionError, QwenCaptchaClient
 from seat_assistant.config import _load_dotenv, load_account_settings
 from seat_assistant.date_selection import date_option_matches, normalize_date
@@ -523,19 +523,75 @@ async def visible_library_names(page) -> list[str]:
     return values
 
 
+def library_control_selectors() -> tuple[str, ...]:
+    return (
+        "input[placeholder*='场馆'], input[placeholder*='地点'], input[placeholder*='图书馆']",
+        "input.el-input__inner",
+        ".el-select__caret",
+        ".el-input__suffix",
+    )
+
+
+async def find_library_selector(page):
+    for selector_text in (
+        library_control_selectors()[0],
+        ".el-select:visible input.el-input__inner",
+    ):
+        selector = page.locator(selector_text).first
+        if await selector.count() > 0:
+            return selector
+    return None
+
+
+async def click_library_option(page, options, name) -> None:
+    """Click a library item while tolerating Element UI list re-renders."""
+    target = normalize_library(name)
+    visible_names = []
+    option = None
+    for index in range(await options.count()):
+        candidate = options.nth(index)
+        text = (await candidate.inner_text()).strip()
+        if text:
+            visible_names.append(text)
+        if normalize_library(text) == target:
+            option = candidate
+            break
+    if option is None:
+        raise RuntimeError(f"未找到图书馆选项‘{name}’；当前可见选项：{visible_names}")
+
+    try:
+        await option.click(force=True, timeout=2500)
+        return
+    except Exception as click_error:
+        try:
+            await option.evaluate(
+                """element => {
+                    element.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                    element.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+                    element.click();
+                }"""
+            )
+            return
+        except Exception as dom_error:
+            raise RuntimeError(
+                f"图书馆选项‘{name}’点击失败：{click_error}；DOM 触发也失败：{dom_error}"
+            ) from dom_error
+
+
 async def open_library_options(page):
     """Open the library dropdown without requiring a first manual click."""
-    selector = page.locator(
-        "input[placeholder*='场馆'], input[placeholder*='地点'], input[placeholder*='图书馆']"
-    ).first
-    if await selector.count() == 0:
+    selector = await find_library_selector(page)
+    if selector is None:
         raise RuntimeError("未找到图书馆选择框，请确认已进入座位预约首页。")
     await selector.wait_for(state="visible", timeout=15000)
     container = selector.locator("xpath=ancestor::div[contains(@class,'el-select')][1]")
+    arrow = container.locator(".el-select__caret, .el-input__suffix").first
     options = page.locator(".el-select-dropdown:visible .el-select-dropdown__item:visible")
-    for _ in range(3):
-        for control in (container, selector):
+    for _ in range(4):
+        for control in (arrow, container, selector):
             try:
+                if await control.count() == 0:
+                    continue
                 await control.click(force=True)
             except Exception:
                 try:
@@ -547,13 +603,15 @@ async def open_library_options(page):
                 return selector, options
             except Exception:
                 pass
-        try:
-            await selector.focus()
-            await selector.press("ArrowDown")
-            await options.first.wait_for(state="visible", timeout=1500)
-            return selector, options
-        except Exception:
-            await page.wait_for_timeout(300)
+        for key in ("Enter", "ArrowDown"):
+            try:
+                await selector.focus()
+                await selector.press(key)
+                await options.first.wait_for(state="visible", timeout=1500)
+                return selector, options
+            except Exception:
+                pass
+        await page.wait_for_timeout(300)
     raise RuntimeError("图书馆下拉菜单无法自动打开，请确认页面组件已加载。")
 
 
@@ -674,8 +732,12 @@ async def login_if_configured(page, settings=None):
         print("账号凭据为空，将复用浏览器会话；若未登录请先手动登录。")
         return False
     if is_seat_app_url(page.url):
-        print(f"账号 {getattr(settings, 'account_id', 'default')} 浏览器会话已经登录，跳过账号密码填写。")
-        return True
+        body_text = await page.locator("body").inner_text()
+        reason = login_failure_message(body_text)
+        if not reason:
+            print(f"账号 {getattr(settings, 'account_id', 'default')} 浏览器会话已经登录，跳过账号密码填写。")
+            return True
+        raise RuntimeError(f"登录失败：{reason}")
     if "#/login" in page.url:
         try:
             await wait_for_authenticated_page(page, timeout_ms=15000)
@@ -690,37 +752,72 @@ async def login_if_configured(page, settings=None):
     pwd = page.locator("input[type='password'], input[name='password']").first
     if await user.count() == 0 or await pwd.count() == 0:
         raise RuntimeError("未找到统一身份认证输入框，请清空凭据后手动登录，或检查登录页面变化。")
-    await user.fill(account)
-    await pwd.fill(password)
-    captcha = page.locator(", ".join(captcha_input_selectors())).first
-    captcha_visible = await captcha.count() > 0 and await captcha.is_visible()
-    if captcha_visible:
-        answer = await solve_captcha_if_configured(page, settings, captcha)
-        if answer is None:
-            raise RuntimeError("检测到登录验证码，但本地识别和已配置的视觉模型都未给出可验证答案；为避免盲目提交，本次登录已停止。")
-        await captcha.fill(answer)
     submit = page.locator("button[type='submit'], input[type='submit'], button:has-text('登录'), input[value*='登录']").first
     if await submit.count() == 0:
         raise RuntimeError("未找到登录按钮，请清空凭据后手动登录。")
-    await submit.click()
-    try:
-        await wait_for_authenticated_page(page, timeout_ms=30000)
-    except Exception as exc:
-        body_text = await page.locator("body").inner_text()
-        reason = login_failure_message(body_text)
-        if reason:
-            raise RuntimeError(f"登录失败：{reason}") from exc
-        raise RuntimeError("登录后未确认进入座位预约首页") from exc
-    return True
+    for login_attempt in range(2):
+        await user.fill(account)
+        await pwd.fill(password)
+        captcha = page.locator(", ".join(captcha_input_selectors())).first
+        captcha_visible = await captcha.count() > 0 and await captcha.is_visible()
+        if captcha_visible:
+            answer = await solve_captcha_if_configured(page, settings, captcha)
+            if answer is None:
+                raise RuntimeError("检测到登录验证码，但本地识别和已配置的视觉模型都未给出可验证答案；为避免盲目提交，本次登录已停止。")
+            await captcha.fill(answer)
+        await submit.click()
+        try:
+            await wait_for_authenticated_page(page, timeout_ms=30000)
+            return True
+        except Exception as exc:
+            body_text = await page.locator("body").inner_text()
+            reason = login_failure_message(body_text)
+            if login_attempt == 0 and is_captcha_failure_message(reason):
+                print(f"登录验证码校验失败：{reason}；正在刷新验证码并重试一次。")
+                await refresh_login_captcha(page, getattr(settings, "login_url", SITE_URL))
+                continue
+            if reason:
+                raise RuntimeError(f"登录失败：{reason}") from exc
+            raise RuntimeError("登录后未确认进入座位预约首页") from exc
+    raise RuntimeError("登录验证码连续失败，已停止自动重试。")
 
 
 async def wait_for_authenticated_page(page, timeout_ms: int = 30000):
     deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
     while asyncio.get_running_loop().time() < deadline:
+        body_text = await page.locator("body").inner_text()
+        reason = login_failure_message(body_text)
+        if reason:
+            raise RuntimeError(f"登录失败：{reason}")
         if is_seat_app_url(page.url):
             return
         await page.wait_for_timeout(500)
     raise RuntimeError(f"登录跳转超时，当前页面：{sanitize_url(page.url)}")
+
+
+async def refresh_login_captcha(page, login_url: str | None = None) -> None:
+    try:
+        if login_url:
+            await page.goto(login_url, wait_until="domcontentloaded")
+        else:
+            await page.reload(wait_until="domcontentloaded")
+        await page.wait_for_timeout(500)
+        return
+    except Exception:
+        pass
+    image_locator = page.locator(", ".join(captcha_image_selectors())).first
+    if await image_locator.count() == 0 or not await image_locator.is_visible():
+        print("验证码失败后未找到可点击的验证码图片，将直接重新读取登录表单。")
+        return
+    try:
+        await image_locator.click(force=True)
+    except Exception:
+        try:
+            await image_locator.evaluate("element => element.click()")
+        except Exception:
+            print("验证码图片刷新失败，将直接重新读取登录表单。")
+            return
+    await page.wait_for_timeout(500)
 
 
 async def solve_captcha_if_configured(page, settings, captcha_input):
@@ -919,34 +1016,29 @@ def reservation_summary(item: dict) -> str:
 
 
 async def select_library(page, name):
-    target = normalize_library(name)
-    selector = page.locator(
-        "input[placeholder*='场馆'], input[placeholder*='地点'], input[placeholder*='图书馆']"
-    ).first
-    if await selector.count() == 0:
+    selector = await find_library_selector(page)
+    if selector is None:
         raise RuntimeError("未找到图书馆选择框，请确认已进入座位预约首页。")
     current = await selector.input_value()
     if library_selected(current, name):
         print(f"图书馆已经是‘{name}’，无需切换。")
         return
-    _, options = await open_library_options(page)
-    option = None
-    visible_names = []
-    for i in range(await options.count()):
-        candidate = options.nth(i)
-        text = (await candidate.inner_text()).strip()
-        visible_names.append(text)
-        if normalize_library(text) == target:
-            option = candidate
-            break
-    if option is None:
-        raise RuntimeError(f"未找到图书馆选项‘{name}’；当前可见选项：{visible_names}")
-    await option.click()
-    await page.wait_for_timeout(800)
-    selected = await selector.input_value()
-    if not library_selected(selected, name):
-        raise RuntimeError(f"图书馆切换未生效，当前显示‘{selected}’。")
-    print(f"图书馆已切换为：{selected}")
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            _, options = await open_library_options(page)
+            await click_library_option(page, options, name)
+            await page.wait_for_timeout(300 + attempt * 200)
+            selected = await selector.input_value()
+            if library_selected(selected, name):
+                print(f"图书馆已切换为：{selected}")
+                return
+            last_error = RuntimeError(f"当前显示‘{selected}’")
+        except Exception as exc:
+            last_error = exc
+        if attempt < 3:
+            await page.wait_for_timeout(300)
+    raise RuntimeError(f"图书馆切换未生效：{name}；最后一次原因：{last_error}") from last_error
 
 
 async def select_date(page, target_date):

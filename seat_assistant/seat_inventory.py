@@ -15,6 +15,14 @@ FREE_MARKERS = ("seat-free", "free-seat", "is-free", "available")
 BUSY_MARKERS = ("seat-reserved", "seat-busy", "occupied", "unavailable", "disabled")
 
 
+def normalize_seat_number(value: str) -> str:
+    """Normalize numeric seat labels while retaining the page's original label."""
+    text = str(value or "").strip()
+    if text.isdigit():
+        return str(int(text))
+    return text
+
+
 def seats_from_snapshot(candidates: list[dict]) -> list[Seat]:
     by_number: dict[str, Seat] = {}
     for item in candidates:
@@ -23,9 +31,10 @@ def seats_from_snapshot(candidates: list[dict]) -> list[Seat]:
         if not re.fullmatch(r"\d{1,5}", text) or "seat" not in class_name:
             continue
         state = _state(class_name)
-        current = by_number.get(text)
+        key = normalize_seat_number(text)
+        current = by_number.get(key)
         if current is None or (current.available is None and state is not None):
-            by_number[text] = Seat(text, state)
+            by_number[key] = Seat(text, state)
     return sorted(by_number.values(), key=lambda seat: int(seat.number))
 
 
@@ -53,10 +62,11 @@ def available_seats(seats: list[Seat]) -> list[Seat]:
 
 def choose_seat(seats: list[Seat], preferred: list[str]) -> Seat | None:
     available = available_seats(seats)
-    by_number = {seat.number: seat for seat in available}
+    by_number = {normalize_seat_number(seat.number): seat for seat in available}
     for number in preferred:
-        if number in by_number:
-            return by_number[number]
+        normalized = normalize_seat_number(number)
+        if normalized in by_number:
+            return by_number[normalized]
     return available[0] if available else None
 
 
@@ -74,12 +84,19 @@ def candidates_for_preference(
         floor = str(preference.get("floor", "")).strip()
         available = [seat for seat in available if _floor_matches(seat.floor, floor)]
     if mode == "seats":
-        by_number = {seat.number: seat for seat in available}
-        ordered = [by_number[number] for number in preference.get("seats", []) if number in by_number]
+        by_number = {normalize_seat_number(seat.number): seat for seat in available}
+        ordered = [
+            by_number[normalize_seat_number(number)]
+            for number in preference.get("seats", [])
+            if normalize_seat_number(number) in by_number
+        ]
         if preference.get("strict"):
             return ordered
-        selected = {seat.number for seat in ordered}
-        ordered.extend(seat for seat in available if seat.number not in selected)
+        selected = {normalize_seat_number(seat.number) for seat in ordered}
+        ordered.extend(
+            seat for seat in available
+            if normalize_seat_number(seat.number) not in selected
+        )
         return ordered
     if mode == "random":
         result = list(available)

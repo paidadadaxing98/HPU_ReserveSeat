@@ -1,5 +1,5 @@
 import seat_assistant.auth_flow as auth_flow
-from seat_assistant.auth_flow import api_auth_headers, auth_header_names, browser_api_headers, captcha_image_selectors, captcha_input_selectors, captcha_kind_from_text, classify_login_state, credentials_available, is_seat_app_url, is_cas_url, library_selected, login_failure_message, normalize_library
+from seat_assistant.auth_flow import api_auth_headers, auth_header_names, browser_api_headers, captcha_image_selectors, captcha_input_selectors, captcha_kind_from_text, classify_login_state, credentials_available, is_captcha_failure_message, is_seat_app_url, is_cas_url, library_selected, login_failure_message, normalize_library
 from seat_assistant.config import load_account_settings
 from scripts.preview_reservation import record_api_auth, request_token
 
@@ -33,6 +33,7 @@ def test_captcha_selectors_cover_common_cas_fields():
 
 def test_classify_login_state_distinguishes_authenticated_form_captcha_and_unknown():
     assert classify_login_state("https://seatlib.hpu.edu.cn/libseat/#/home", "", False, False, False) == "authenticated"
+    assert classify_login_state("https://seatlib.hpu.edu.cn/libseat/#/home", "提示：验证码校验失败", False, False, False) == "failed"
     assert classify_login_state("https://uia.hpu.edu.cn/cas/login", "", True, True, False) == "form"
     assert classify_login_state("https://uia.hpu.edu.cn/cas/login", "", True, True, True) == "captcha"
     assert classify_login_state("https://example.test/", "", False, False, False) == "unknown"
@@ -47,7 +48,24 @@ def test_captcha_kind_detection_prefers_arithmetic_or_letters_and_defaults_to_au
 def test_login_failure_message_extracts_safe_user_facing_reason():
     assert login_failure_message("提示：验证码错误，请重新输入") == "验证码错误"
     assert login_failure_message("用户名或密码不正确") == "用户名或密码不正确"
+    assert login_failure_message("验证码校验失败，请重试") == "验证码校验失败"
+    assert login_failure_message("验证失败") == "验证失败"
     assert login_failure_message("欢迎登录") == ""
+
+
+def test_only_captcha_failures_are_safe_to_retry():
+    assert is_captcha_failure_message("验证码错误")
+    assert is_captcha_failure_message("验证码校验失败")
+    assert is_captcha_failure_message("验证失败")
+    assert not is_captcha_failure_message("用户名或密码错误")
+    assert not is_captcha_failure_message("登录失败")
+
+
+def test_captcha_failure_classifier_accepts_only_known_captcha_messages():
+    assert is_captcha_failure_message("验证码不正确")
+    assert is_captcha_failure_message("验证码有误")
+    assert not is_captcha_failure_message("认证失败")
+    assert not is_captcha_failure_message("用户名或密码不正确")
 
 
 def test_api_auth_headers_keep_credentials_but_drop_transport_headers():

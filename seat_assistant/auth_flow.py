@@ -50,14 +50,14 @@ def captcha_image_selectors() -> tuple[str, ...]:
 
 def classify_login_state(url: str, body_text: str, has_user_input: bool, has_password_input: bool, has_captcha_input: bool) -> str:
     """Classify only observable page state; no credentials or token values are returned."""
+    if login_failure_message(body_text):
+        return "failed"
     if is_seat_app_url(url):
         return "authenticated"
     if has_user_input and has_password_input and has_captcha_input:
         return "captcha"
     if has_user_input and has_password_input:
         return "form"
-    if login_failure_message(body_text):
-        return "failed"
     return "unknown"
 
 
@@ -72,10 +72,28 @@ def captcha_kind_from_text(text: str) -> str:
 
 def login_failure_message(text: str) -> str:
     normalized = " ".join((text or "").split())
-    for marker in ("验证码错误", "用户名或密码不正确", "账号或密码错误", "登录失败", "验证码不能为空"):
+    for marker in (
+        "验证码错误",
+        "验证码不正确",
+        "验证码有误",
+        "验证码校验失败",
+        "验证码不能为空",
+        "用户名或密码不正确",
+        "用户名或密码错误",
+        "账号或密码错误",
+        "登录失败",
+        "验证失败",
+        "认证失败",
+    ):
         if marker in normalized:
             return marker
     return ""
+
+
+def is_captcha_failure_message(message: str) -> bool:
+    """Return whether a login failure can be safely retried with a new captcha."""
+    normalized = str(message or "").strip()
+    return "验证码" in normalized or normalized == "验证失败"
 
 
 def api_auth_headers(headers: dict[str, str]) -> dict[str, str]:

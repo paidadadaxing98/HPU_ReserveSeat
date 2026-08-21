@@ -1,7 +1,7 @@
 import re
 import random
 
-from .seat_inventory import Seat, candidates_for_preference, choose_seat
+from .seat_inventory import Seat, candidates_for_preference, choose_seat, normalize_seat_number
 
 
 def normalize_room_name(value: str) -> str:
@@ -213,10 +213,17 @@ def preview_seat_candidates(
         return candidates_for_preference(seats, preference, seed=seed)
     preferred = preferred or []
     available = [seat for seat in seats if seat.available is True]
-    by_number = {seat.number: seat for seat in available}
-    ordered = [by_number[number] for number in preferred if number in by_number]
-    selected_numbers = {seat.number for seat in ordered}
-    ordered.extend(seat for seat in available if seat.number not in selected_numbers)
+    by_number = {normalize_seat_number(seat.number): seat for seat in available}
+    ordered = [
+        by_number[normalize_seat_number(number)]
+        for number in preferred
+        if normalize_seat_number(number) in by_number
+    ]
+    selected_numbers = {normalize_seat_number(seat.number) for seat in ordered}
+    ordered.extend(
+        seat for seat in available
+        if normalize_seat_number(seat.number) not in selected_numbers
+    )
     return ordered
 
 
@@ -229,7 +236,10 @@ def first_time_compatible_seat(
 ) -> Seat | None:
     """Pick the first free seat whose server options contain both times."""
     for seat in preview_seat_candidates(seats, preferred):
-        available_start, available_end = time_options.get(seat.number, ([], []))
+        available_start, available_end = time_options.get(
+            seat.number,
+            time_options.get(normalize_seat_number(seat.number), ([], [])),
+        )
         if start in available_start and end in available_end:
             return seat
     return None

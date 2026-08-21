@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 from seat_assistant.storage import Repository
 from scripts import preview_reservation as preview_module
-from scripts.preview_reservation import ensure_initialized_account, library_switch_needed, parse_args
+from scripts.preview_reservation import click_library_option, ensure_initialized_account, library_control_selectors, library_switch_needed, parse_args, refresh_login_captcha, wait_for_authenticated_page
 from scripts.initialize_account import parse_args as parse_initialize_args
 
 
@@ -91,6 +91,116 @@ def test_multi_library_fallback_switches_back_to_the_actual_current_library():
             current = target
 
     assert switches == ["南校区第二图书馆", "南校区第一图书馆"]
+
+
+def test_library_dropdown_controls_include_element_ui_input_and_arrow_paths():
+    selectors = library_control_selectors()
+
+    assert "input.el-input__inner" in selectors
+    assert ".el-select__caret" in selectors
+    assert ".el-input__suffix" in selectors
+
+
+def test_library_option_click_falls_back_to_dom_for_dynamic_element_ui_item():
+    class Option:
+        def __init__(self, text):
+            self.text = text
+            self.click_attempts = 0
+            self.dom_clicked = False
+
+        async def inner_text(self):
+            return self.text
+
+        async def click(self, **kwargs):
+            self.click_attempts += 1
+            raise TimeoutError("element is not stable")
+
+        async def evaluate(self, script):
+            self.dom_clicked = True
+
+    class Options:
+        def __init__(self):
+            self.items = [Option("南校区第一图书馆"), Option("南校区第二图书馆")]
+
+        async def count(self):
+            return len(self.items)
+
+        def nth(self, index):
+            return self.items[index]
+
+    options = Options()
+    asyncio.run(click_library_option(object(), options, "南校区第二图书馆"))
+
+    assert options.items[1].click_attempts == 1
+    assert options.items[1].dom_clicked is True
+
+
+def test_authenticated_wait_rejects_captcha_failure_even_on_seat_home_url():
+    class Body:
+        async def inner_text(self):
+            return "登录页面提示：验证码有误，请重新输入"
+
+    class Page:
+        url = "https://seatlib.hpu.edu.cn/libseat/#/home"
+
+        def locator(self, selector):
+            return Body()
+
+        async def wait_for_timeout(self, delay):
+            raise AssertionError("captcha failure should be reported immediately")
+
+    with pytest.raises(RuntimeError, match="验证码有误"):
+        asyncio.run(wait_for_authenticated_page(Page(), timeout_ms=1000))
+
+
+def test_captcha_refresh_reloads_login_page_to_clear_stale_failure_message():
+    class Image:
+        @property
+        def first(self):
+            return self
+
+        async def count(self):
+            return 1
+
+        async def is_visible(self):
+            return True
+
+        async def click(self, **kwargs):
+            raise AssertionError("a reload should be preferred over clicking a stale captcha")
+
+    class Page:
+        def __init__(self):
+            self.reloaded = False
+
+        def locator(self, selector):
+            return Image()
+
+        async def reload(self, wait_until):
+            self.reloaded = True
+
+        async def wait_for_timeout(self, delay):
+            return None
+
+    page = Page()
+    asyncio.run(refresh_login_captcha(page))
+    assert page.reloaded is True
+
+
+def test_captcha_refresh_can_return_to_configured_login_url():
+    class Page:
+        def __init__(self):
+            self.url = "https://seatlib.hpu.edu.cn/libseat/#/home"
+            self.visited = ""
+
+        async def goto(self, url, wait_until):
+            self.visited = url
+
+        async def wait_for_timeout(self, delay):
+            return None
+
+    page = Page()
+    asyncio.run(refresh_login_captcha(page, "https://seatlib.hpu.edu.cn/libseat/"))
+    assert page.visited == "https://seatlib.hpu.edu.cn/libseat/"
 
 
 def test_runtime_catalog_collection_keeps_other_libraries_when_one_fails(monkeypatch):

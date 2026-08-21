@@ -1,4 +1,4 @@
-from seat_assistant.seat_inventory import Seat, available_seats, candidates_for_preference, choose_seat, seats_from_layout, seats_from_snapshot
+from seat_assistant.seat_inventory import Seat, available_seats, candidates_for_preference, choose_seat, normalize_seat_number, seats_from_layout, seats_from_snapshot
 
 
 def test_extracts_number_and_state_from_candidates():
@@ -19,6 +19,18 @@ def test_unknown_states_are_not_available():
 def test_choose_seat_prefers_configured_order_then_room_fallback():
     seats = [Seat("170", True), Seat("169", True), Seat("171", True)]
     assert choose_seat(seats, ["169", "999"]).number == "169"
+
+
+def test_seat_numbers_match_by_number_even_when_page_pads_with_zeroes():
+    seats = [Seat("001", True), Seat("023", True), Seat("085", True)]
+
+    assert normalize_seat_number("23") == "23"
+    assert normalize_seat_number("023") == "23"
+    assert choose_seat(seats, ["23"]).number == "023"
+    assert [seat.number for seat in candidates_for_preference(
+        seats,
+        {"mode": "seats", "seats": ["23"], "strict": True},
+    )] == ["023"]
 
 
 def test_random_seat_candidates_are_stable_for_the_same_time_seed():
