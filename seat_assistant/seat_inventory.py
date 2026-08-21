@@ -76,6 +76,8 @@ def candidates_for_preference(
     if mode == "seats":
         by_number = {seat.number: seat for seat in available}
         ordered = [by_number[number] for number in preference.get("seats", []) if number in by_number]
+        if preference.get("strict"):
+            return ordered
         selected = {seat.number for seat in ordered}
         ordered.extend(seat for seat in available if seat.number not in selected)
         return ordered

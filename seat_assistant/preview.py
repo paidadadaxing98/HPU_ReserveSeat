@@ -1,6 +1,7 @@
-from .seat_inventory import Seat, candidates_for_preference, choose_seat
 import re
 import random
+
+from .seat_inventory import Seat, candidates_for_preference, choose_seat
 
 
 def normalize_room_name(value: str) -> str:
@@ -10,6 +11,127 @@ def normalize_room_name(value: str) -> str:
 def selection_seed(account_id: str, day: str, period: str, start: str, end: str, scope: str = "") -> str:
     """Build a stable per-request seed for room and seat randomization."""
     return "|".join(str(item or "") for item in (account_id, day, period, start, end, scope))
+
+
+def room_preference_candidates(
+    rules: list[dict] | None,
+    libraries: list[str],
+    rooms_by_library: dict[str, list[str]],
+    seed: str | int | None = None,
+) -> list[dict]:
+    """Expand ordered seat rules into runtime library/room candidates.
+
+    Numeric components use the catalogs' one-based indexes. A wildcard room
+    expands to all rooms in stable random order so an unavailable room can be
+    skipped without changing the order for the same request.
+    """
+    available_libraries = [str(item).strip() for item in libraries if str(item).strip()]
+    ordered_rules = sorted(
+        enumerate(rules or []),
+        key=lambda pair: (-_rule_precision(pair[1]), pair[0]),
+    )
+    candidates = []
+    seen = set()
+    first_error = None
+    for rule_number, rule in ordered_rules:
+        if not isinstance(rule, dict):
+            first_error = first_error or ValueError("座位规则必须是对象")
+            continue
+        try:
+            library = _resolve_library_value(rule, available_libraries)
+        except ValueError as exc:
+            first_error = first_error or exc
+            continue
+        rooms = [str(item).strip() for item in rooms_by_library.get(library, []) if str(item).strip()]
+        if not rooms:
+            first_error = first_error or ValueError(f"图书馆‘{library}’当前没有可用阅览室")
+            continue
+        room_index = _stored_index(rule.get("room_index"))
+        room_value = str(rule.get("room", "x") or "x").strip()
+        if room_value.lower() in {"", "x"}:
+            room_candidates = list(rooms)
+            random.Random(_candidate_seed(seed, rule_number, library)).shuffle(room_candidates)
+        elif room_index is not None or room_value.isdigit():
+            room_index = room_index or int(room_value)
+            if not 1 <= room_index <= len(rooms):
+                first_error = first_error or ValueError(
+                    f"图书馆‘{library}’的阅览室编号无效：{room_index}；请输入 1-{len(rooms)}"
+                )
+                continue
+            room_candidates = [rooms[room_index - 1]]
+        else:
+            room_candidates = [
+                room for room in rooms
+                if normalize_room_name(room) == normalize_room_name(room_value)
+            ]
+            if not room_candidates:
+                first_error = first_error or ValueError(f"没有找到指定阅览室：{room_value}")
+                continue
+        seat_value = str(rule.get("seat", "x") or "x").strip()
+        if seat_value.lower() in {"", "x"}:
+            preference = {"mode": "random"}
+        else:
+            preference = {"mode": "seats", "seats": [seat_value], "strict": True}
+        for room in room_candidates:
+            key = (
+                normalize_library_name(library),
+                normalize_room_name(room),
+                tuple(preference.get("seats", ())),
+                preference.get("mode"),
+                bool(preference.get("strict")),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append({
+                "library": library,
+                "room": room,
+                "preference": dict(preference),
+                "rule": dict(rule),
+            })
+    if not candidates:
+        if first_error is not None:
+            raise first_error
+        raise ValueError("没有可用的座位规则")
+    return candidates
+
+
+def _rule_precision(rule: dict) -> int:
+    return sum(str(rule.get(key, "x") or "x").lower() != "x" for key in ("library", "room", "seat"))
+
+
+def _candidate_seed(seed: str | int | None, rule_number: int, library: str) -> str:
+    return f"{seed or ''}|rule={rule_number}|library={library}"
+
+
+def normalize_library_name(value: str) -> str:
+    return "".join(str(value or "").split())
+
+
+def _resolve_library_value(rule: dict, libraries: list[str]) -> str:
+    value = str(rule.get("library", "")).strip()
+    if not value:
+        raise ValueError("座位规则必须指定图书馆")
+    index = _stored_index(rule.get("library_index"))
+    if index is not None or value.isdigit():
+        index = index or int(value)
+        if not 1 <= index <= len(libraries):
+            raise ValueError(f"图书馆编号无效：{index}；请输入 1-{len(libraries)}")
+        return libraries[index - 1]
+    target = normalize_library_name(value)
+    for library in libraries:
+        if normalize_library_name(library) == target:
+            return library
+    raise ValueError(f"没有找到指定图书馆：{value}")
+
+
+def _stored_index(value) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def room_floor(value: str) -> str:

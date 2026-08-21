@@ -31,6 +31,15 @@ def test_random_seat_candidates_are_stable_for_the_same_time_seed():
     assert {seat.number for seat in first} == {"168", "169", "170"}
 
 
+def test_strict_specific_seat_does_not_fall_back_inside_the_same_rule():
+    seats = [Seat("169", True, 169), Seat("170", True, 170)]
+
+    assert candidates_for_preference(
+        seats,
+        {"mode": "seats", "seats": ["168"], "strict": True},
+    ) == []
+
+
 def test_layout_response_uses_server_status_and_seat_id():
     layout = {"id": 28, "name": "阅览室", "layout": {
         "1": {"type": "seat", "id": 10, "name": "028", "status": "FREE", "enabled": True},

@@ -23,8 +23,9 @@ from seat_assistant.config import _load_dotenv, load_account_settings
 from seat_assistant.date_selection import date_option_matches, normalize_date
 from seat_assistant.end_times import parse_native_end_times
 from seat_assistant.booking_window import validate_booking_date
+from seat_assistant.initialization import initialization_skip_message
 from seat_assistant.notifications import WeComNotifier, send_reservation_notification
-from seat_assistant.preview import choose_room_for_preference, layout_from_response, layout_request_matches, normalize_room_name, preview_seat_candidates, selection_seed
+from seat_assistant.preview import choose_room_for_preference, layout_from_response, layout_request_matches, normalize_room_name, preview_seat_candidates, room_preference_candidates, selection_seed
 from seat_assistant.reservation import SeatResult
 from seat_assistant.seat_inventory import seats_from_layout
 from seat_assistant.storage import Repository
@@ -35,19 +36,40 @@ CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 PROFILE = Path(".browser-profile").resolve()
 
 
+def ensure_initialized_account(settings, repository) -> None:
+    """Stop direct account commands until the read-only setup is complete."""
+    if not getattr(settings, "require_initialization", False):
+        return
+    state = repository.initialization_state()
+    if state["status"] != "ready":
+        raise ValueError(initialization_skip_message(state))
+
+
+def library_switch_needed(current_library: str, target_library: str) -> bool:
+    return not library_selected(current_library, target_library)
+
+
 async def main(args):
     _load_dotenv()
     interactive = getattr(args, "interactive", True)
     record_success_quota = getattr(args, "record_success_quota", True)
     account_settings = load_account_settings(args.account)
-    if not args.preferred:
+    cli_preferred = bool(args.preferred)
+    if not cli_preferred:
         args.preferred = list(account_settings.preferred_seats)
-    args.preference = getattr(account_settings, "seat_preference", {})
+    args.preference = (
+        {"mode": "seats", "seats": list(args.preferred)}
+        if cli_preferred
+        else getattr(account_settings, "seat_preference", {})
+    )
     args.location = dict(getattr(account_settings, "location_preference", {}) or {})
-    if not args.location.get("library"):
+    seat_rules = [dict(rule) for rule in getattr(account_settings, "seat_rules", [])]
+    use_seat_rules = bool(seat_rules) and not getattr(args, "room", "") and not cli_preferred
+    if not args.location.get("library") and not use_seat_rules:
         raise ValueError("账号尚未配置图书馆位置偏好，请先运行初始化命令")
     profile = Path(account_settings.profile_path)
     repository = Repository(str(account_settings.db_path), account_settings.account_id)
+    ensure_initialized_account(account_settings, repository)
     notifier = WeComNotifier(account_settings.wecom_webhook)
     validate_booking_date(args.date, __import__('datetime').datetime.now())
     args.start = validate_half_hour_time(args.start)
@@ -85,11 +107,37 @@ async def main(args):
                     pause_for_manual_interaction("登录完成后按回车：", interactive=interactive)
             print("正在确认进入座位预约首页……")
             await page.wait_for_url("**/libseat/**", timeout=30000)
-            print(f"程序操作：自动选择图书馆‘{args.location['library']}’。")
-            await select_library(page, args.location["library"])
+            if use_seat_rules:
+                libraries = await visible_library_names(page)
+                rooms_by_library, catalog_errors = await collect_rooms_by_library(page, libraries)
+                for library, error in catalog_errors.items():
+                    print(f"读取图书馆‘{library}’的阅览室失败：{error}")
+                room_candidates = room_preference_candidates(
+                    seat_rules,
+                    libraries,
+                    rooms_by_library,
+                    seed=selection_seed(
+                        account_settings.account_id,
+                        args.date,
+                        getattr(args, "period", "manual"),
+                        args.start,
+                        args.end,
+                    ),
+                )
+                args.location = {"library": room_candidates[0]["library"], "floor": "", "room": room_candidates[0]["room"]}
+                args.preference = dict(room_candidates[0]["preference"])
+                args.room = room_candidates[0]["room"]
+                print(f"按座位规则准备候选：{len(room_candidates)} 个图书馆/阅览室组合。")
+                await select_library(page, room_candidates[0]["library"])
+                current_library = room_candidates[0]["library"]
+            else:
+                print(f"程序操作：自动选择图书馆‘{args.location['library']}’。")
+                await select_library(page, args.location["library"])
+                room_candidates = None
+                current_library = args.location["library"]
             print(f"程序操作：自动选择预约日期‘{args.date}’。")
             await select_date(page, args.date)
-            if not getattr(args, "room", ""):
+            if room_candidates is None and not getattr(args, "room", ""):
                 room_names = await visible_room_names(page)
                 room_preference = {
                     **args.location,
@@ -113,6 +161,12 @@ async def main(args):
                     round_robin=round_robin,
                 )
                 print(f"根据座位偏好选择阅览室：{args.room}")
+            if room_candidates is None:
+                room_candidates = [{
+                    "library": args.location["library"],
+                    "room": args.room,
+                    "preference": dict(args.preference),
+                }]
             existing = await fetch_user_reservations(page, api_auth)
             print(f"当天预约记录：{daily_reservation_details(existing, args.date) or '无'}")
             local_record = repository.get_reservation(args.date, "manual")
@@ -136,89 +190,53 @@ async def main(args):
                 print(f"首页已检测到相近预约，跳过选座和提交：{reservation_summary(similar)}")
                 await context.close()
                 return
-            print(f"程序操作：自动点击阅览室‘{args.room}’，请不要在网页上点击阅览室。")
-            async with page.expect_response(lambda response: layout_request_matches(response.url), timeout=30000) as response_info:
-                await page.get_by_text(args.room, exact=True).first.click()
-            response = await response_info.value
         except Exception as exc:
             print(f"流程暂停：{exc}")
             print(f"浏览器当前页面：{sanitize_url(page.url)}")
             pause_for_manual_interaction("请检查浏览器页面；确认后按回车关闭浏览器：", interactive=interactive)
             return
-        body = await response.json()
-        print(f"座位布局接口：HTTP {response.status}，code={body.get('code')}，message={body.get('message')}")
-        layout = layout_from_response(body)
-        actual_room_id = layout.get("id")
-        print(f"网页返回阅览室：{layout.get('name')}，ID={actual_room_id}")
-        if normalize_room_name(layout.get("name", "")) != normalize_room_name(args.room):
-            raise ValueError(f"网页返回的阅览室是‘{layout.get('name')}’，不是‘{args.room}’。请检查图书馆选择。")
-        if args.room_id is not None and args.room_id != actual_room_id:
-            print(f"提示：命令中的 room-id={args.room_id} 与网页实际 ID={actual_room_id} 不一致；本次使用网页实际 ID。")
-        seats = seats_from_layout(layout)
         selected = None
         request_headers = {}
         candidate_errors = []
-        for candidate in preview_seat_candidates(
-            seats,
-            args.preferred,
-            args.preference,
-            seed=selection_seed(
-                account_settings.account_id,
-                args.date,
-                getattr(args, "period", "manual"),
-                args.start,
-                args.end,
-                args.room,
-            ),
-        ):
-            print(f"尝试座位：{candidate.number}（座位ID {candidate.seat_id}，状态 FREE）")
+        for room_candidate in room_candidates:
+            args.location["library"] = room_candidate["library"]
+            args.room = room_candidate["room"]
+            args.preference = dict(room_candidate["preference"])
             try:
-                async with page.expect_response(lambda r: "/rest/v2/startTimesForSeat/" in r.url, timeout=15000) as start_info:
-                    await page.get_by_text(candidate.number, exact=True).last.click()
-                candidate_start_response = await start_info.value
-                candidate_start_body = await candidate_start_response.json()
-                candidate_headers = await candidate_start_response.request.all_headers()
-                record_api_auth(api_auth, candidate_start_response.request.url, candidate_headers)
-                if candidate_start_body.get("code") not in (0, "0"):
-                    raise RuntimeError(f"开始时间接口失败：code={candidate_start_body.get('code')}，message={candidate_start_body.get('message') or '无'}")
-                normalized_start = time_values(candidate_start_body, "startTimes")
-                if not requested_times_available(normalized_start, [args.start]):
-                    raise RuntimeError(f"可选开始时间为 {normalized_start or '未知'}，不包含 {args.start}")
-                start_id = time_option_id(candidate_start_body, "startTimes", args.start)
-                if not start_id:
-                    raise RuntimeError(f"开始时间 {args.start} 缺少网页返回的原生 id，已停止。")
-                async with page.expect_response(lambda r: end_time_response_matches_start(r.url, start_id), timeout=15000) as end_info:
-                    await click_and_verify_time(page, args.start, "开始", verify=True)
-                candidate_end_response = await end_info.value
-                candidate_end_body = await candidate_end_response.json()
-                candidate_end_headers = await candidate_end_response.request.all_headers()
-                record_api_auth(api_auth, candidate_end_response.request.url, candidate_end_headers)
-                native_end = parse_native_end_times(candidate_end_response.url, candidate_end_body)
-                candidate_end = list(native_end.options)
-                end_url = native_end.url
-                if not native_end.ok:
-                    raise RuntimeError(
-                        f"结束时间接口失败：URL={end_url}，code={candidate_end_body.get('code')}，"
-                        f"message={candidate_end_body.get('message') or '无'}"
-                    )
-                if not requested_times_available(candidate_end, [args.end]):
-                    raise RuntimeError(
-                        f"可选结束时间为 {candidate_end or '未知'}，不包含 {args.end}；"
-                        f"接口 URL={end_url}，code={candidate_end_body.get('code')}，"
-                        f"message={candidate_end_body.get('message') or '无'}"
-                    )
-                await wait_for_time_option(page, args.end, "结束")
-                await click_and_verify_time(page, args.end, "结束")
+                if library_switch_needed(current_library, room_candidate["library"]):
+                    await select_library(page, room_candidate["library"])
+                    await select_date(page, args.date)
+                    current_library = room_candidate["library"]
+                print(f"程序操作：自动点击阅览室‘{args.room}’，请不要在网页上点击阅览室。")
+                room_selected, room_headers, room_errors = await select_room_and_seat(
+                    page,
+                    api_auth,
+                    args.room,
+                    args.preferred,
+                    args.preference,
+                    args.date,
+                    args.start,
+                    args.end,
+                    selection_seed(
+                        account_settings.account_id,
+                        args.date,
+                        getattr(args, "period", "manual"),
+                        args.start,
+                        args.end,
+                        args.room,
+                    ),
+                    args.room_id,
+                )
             except Exception as exc:
-                candidate_errors.append(f"{candidate.number}: {exc}")
                 if page.is_closed():
-                    raise RuntimeError(f"浏览器页面已关闭，原始座位错误：{exc}") from exc
-                await close_time_dialog(page)
-                continue
-            selected = candidate
-            request_headers = candidate_headers
-            print(f"接口选择座位：{selected.number}（座位ID {selected.seat_id}，状态 FREE）")
-            break
+                    raise RuntimeError(f"浏览器页面已关闭，阅览室错误：{exc}") from exc
+                room_selected, room_headers, room_errors = None, {}, [f"阅览室 {args.room}: {exc}"]
+            candidate_errors.extend(room_errors)
+            if room_selected is not None:
+                selected = room_selected
+                request_headers = room_headers
+                print(f"接口选择座位：{selected.number}（座位ID {selected.seat_id}，状态 FREE）")
+                break
         if selected is None:
             diagnostics = await auth_diagnostics(page, request_headers)
             details = "；".join(candidate_errors) or "没有可尝试的空闲座位"
@@ -334,6 +352,89 @@ async def main(args):
         await context.close()
 
 
+async def select_room_and_seat(
+    page,
+    api_auth: dict,
+    room: str,
+    preferred: list[str],
+    preference: dict,
+    day: str,
+    start: str,
+    end: str,
+    seed: str,
+    room_id: int | None = None,
+) -> tuple[object | None, dict, list[str]]:
+    """Open one room and try its free seats, returning errors for fallback."""
+    errors = []
+    try:
+        async with page.expect_response(lambda response: layout_request_matches(response.url), timeout=30000) as response_info:
+            await page.get_by_text(room, exact=True).first.click()
+        response = await response_info.value
+        body = await response.json()
+        print(f"座位布局接口：HTTP {response.status}，code={body.get('code')}，message={body.get('message')}")
+        layout = layout_from_response(body)
+        actual_room_id = layout.get("id")
+        print(f"网页返回阅览室：{layout.get('name')}，ID={actual_room_id}")
+        if normalize_room_name(layout.get("name", "")) != normalize_room_name(room):
+            raise ValueError(f"网页返回的阅览室是‘{layout.get('name')}’，不是‘{room}’。请检查图书馆选择。")
+        if room_id is not None and room_id != actual_room_id:
+            print(f"提示：命令中的 room-id={room_id} 与网页实际 ID={actual_room_id} 不一致；本次使用网页实际 ID。")
+    except Exception as exc:
+        if page.is_closed():
+            raise RuntimeError(f"浏览器页面已关闭，阅览室错误：{exc}") from exc
+        return None, {}, [f"阅览室 {room}: {exc}"]
+
+    seats = seats_from_layout(layout)
+    request_headers = {}
+    for candidate in preview_seat_candidates(seats, preferred, preference, seed=seed):
+        print(f"尝试座位：{candidate.number}（座位ID {candidate.seat_id}，状态 FREE）")
+        try:
+            async with page.expect_response(lambda r: "/rest/v2/startTimesForSeat/" in r.url, timeout=15000) as start_info:
+                await page.get_by_text(candidate.number, exact=True).last.click()
+            candidate_start_response = await start_info.value
+            candidate_start_body = await candidate_start_response.json()
+            candidate_headers = await candidate_start_response.request.all_headers()
+            record_api_auth(api_auth, candidate_start_response.request.url, candidate_headers)
+            if candidate_start_body.get("code") not in (0, "0"):
+                raise RuntimeError(f"开始时间接口失败：code={candidate_start_body.get('code')}，message={candidate_start_body.get('message') or '无'}")
+            normalized_start = time_values(candidate_start_body, "startTimes")
+            if not requested_times_available(normalized_start, [start]):
+                raise RuntimeError(f"可选开始时间为 {normalized_start or '未知'}，不包含 {start}")
+            start_id = time_option_id(candidate_start_body, "startTimes", start)
+            if not start_id:
+                raise RuntimeError(f"开始时间 {start} 缺少网页返回的原生 id，已停止。")
+            async with page.expect_response(lambda r: end_time_response_matches_start(r.url, start_id), timeout=15000) as end_info:
+                await click_and_verify_time(page, start, "开始", verify=True)
+            candidate_end_response = await end_info.value
+            candidate_end_body = await candidate_end_response.json()
+            candidate_end_headers = await candidate_end_response.request.all_headers()
+            record_api_auth(api_auth, candidate_end_response.request.url, candidate_end_headers)
+            native_end = parse_native_end_times(candidate_end_response.url, candidate_end_body)
+            candidate_end = list(native_end.options)
+            if not native_end.ok:
+                raise RuntimeError(
+                    f"结束时间接口失败：URL={native_end.url}，code={candidate_end_body.get('code')}，"
+                    f"message={candidate_end_body.get('message') or '无'}"
+                )
+            if not requested_times_available(candidate_end, [end]):
+                raise RuntimeError(
+                    f"可选结束时间为 {candidate_end or '未知'}，不包含 {end}；"
+                    f"接口 URL={native_end.url}，code={candidate_end_body.get('code')}，"
+                    f"message={candidate_end_body.get('message') or '无'}"
+                )
+            await wait_for_time_option(page, end, "结束")
+            await click_and_verify_time(page, end, "结束")
+        except Exception as exc:
+            errors.append(f"{room}/{candidate.number}: {exc}")
+            if page.is_closed():
+                raise RuntimeError(f"浏览器页面已关闭，原始座位错误：{exc}") from exc
+            await close_time_dialog(page)
+            continue
+        return candidate, candidate_headers, errors
+    errors.append(f"阅览室 {room} 没有满足 {start}-{end} 的可用座位")
+    return None, request_headers, errors
+
+
 async def run_scheduled_reservation(settings, day: str, period: str, start: str, end: str) -> SeatResult:
     """Run the same browser flow used by the CLI without interactive prompts."""
     args = argparse.Namespace(
@@ -395,6 +496,65 @@ async def visible_room_names(page) -> list[str]:
         if text and text not in values:
             values.append(text)
     return values
+
+
+async def collect_rooms_by_library(page, libraries: list[str]) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Read each library independently so a stale catalog cannot block fallback rules."""
+    rooms_by_library = {}
+    errors = {}
+    for library in libraries:
+        try:
+            await select_library(page, library)
+            await page.wait_for_timeout(500)
+            rooms_by_library[library] = await visible_room_names(page)
+        except Exception as exc:
+            rooms_by_library[library] = []
+            errors[library] = str(exc) or "未知错误"
+    return rooms_by_library, errors
+
+
+async def visible_library_names(page) -> list[str]:
+    _, locator = await open_library_options(page)
+    values = []
+    for index in range(await locator.count()):
+        text = (await locator.nth(index).inner_text()).strip()
+        if text and text not in values:
+            values.append(text)
+    return values
+
+
+async def open_library_options(page):
+    """Open the library dropdown without requiring a first manual click."""
+    selector = page.locator(
+        "input[placeholder*='场馆'], input[placeholder*='地点'], input[placeholder*='图书馆']"
+    ).first
+    if await selector.count() == 0:
+        raise RuntimeError("未找到图书馆选择框，请确认已进入座位预约首页。")
+    await selector.wait_for(state="visible", timeout=15000)
+    container = selector.locator("xpath=ancestor::div[contains(@class,'el-select')][1]")
+    options = page.locator(".el-select-dropdown:visible .el-select-dropdown__item:visible")
+    for _ in range(3):
+        for control in (container, selector):
+            try:
+                await control.click(force=True)
+            except Exception:
+                try:
+                    await control.evaluate("element => element.click()")
+                except Exception:
+                    continue
+            try:
+                await options.first.wait_for(state="visible", timeout=2500)
+                return selector, options
+            except Exception:
+                pass
+        try:
+            await selector.focus()
+            await selector.press("ArrowDown")
+            await options.first.wait_for(state="visible", timeout=1500)
+            return selector, options
+        except Exception:
+            await page.wait_for_timeout(300)
+    raise RuntimeError("图书馆下拉菜单无法自动打开，请确认页面组件已加载。")
 
 
 def reservation_verification_status(
@@ -760,20 +920,16 @@ def reservation_summary(item: dict) -> str:
 
 async def select_library(page, name):
     target = normalize_library(name)
-    selector = page.locator("input[placeholder*='场馆地点']").first
+    selector = page.locator(
+        "input[placeholder*='场馆'], input[placeholder*='地点'], input[placeholder*='图书馆']"
+    ).first
     if await selector.count() == 0:
         raise RuntimeError("未找到图书馆选择框，请确认已进入座位预约首页。")
     current = await selector.input_value()
     if library_selected(current, name):
         print(f"图书馆已经是‘{name}’，无需切换。")
         return
-    # Click the full Element UI select container and wait for its visible menu.
-    await selector.locator("xpath=ancestor::div[contains(@class,'el-select')][1]").click()
-    options = page.locator(".el-select-dropdown__item:visible")
-    try:
-        await options.first.wait_for(state="visible", timeout=5000)
-    except Exception:
-        raise RuntimeError(f"图书馆下拉菜单没有打开；当前输入框内容为‘{await selector.input_value()}’。")
+    _, options = await open_library_options(page)
     option = None
     visible_names = []
     for i in range(await options.count()):
@@ -1108,10 +1264,14 @@ def _looks_selected_blue(background, color):
     return b >= 180 and r <= 150 and g >= 90
 
 
-if __name__ == "__main__":
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--account", default=None, help="多账号配置中的账号 ID；未指定时使用 default")
-    parser.add_argument("--room", required=True)
+    parser.add_argument(
+        "--room",
+        default="",
+        help="可选；不填写时使用初始化保存的位置偏好自动选择阅览室",
+    )
     parser.add_argument("--room-id", type=int, help="可选，仅用于核对；实际 ID 从网页请求读取")
     parser.add_argument("--date", required=True)
     parser.add_argument("--start", required=True)
@@ -1119,4 +1279,8 @@ if __name__ == "__main__":
     parser.add_argument("--preferred", nargs="*", default=[])
     parser.add_argument("--submit", action="store_true", help="允许真实提交；默认直接提交并自动核验")
     parser.add_argument("--confirm-submit", action="store_true", help="调试护栏：与 --submit 一起使用时要求输入 SUBMIT")
-    asyncio.run(main(parser.parse_args()))
+    return parser.parse_args(argv)
+
+
+if __name__ == "__main__":
+    asyncio.run(main(parse_args()))

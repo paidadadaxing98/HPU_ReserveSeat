@@ -177,6 +177,20 @@ def test_load_account_settings_reads_structured_location_preference(monkeypatch,
     }
 
 
+def test_load_account_settings_reads_ordered_seat_rules(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "accounts.json").write_text(
+        '{"accounts":[{"id":"alice","account":"1001","password":"secret",'
+        '"initialization":{"seat_rules":["2-x-x","2-9-109"]}}]}',
+        encoding="utf-8",
+    )
+
+    assert load_account_settings("alice").seat_rules == [
+        {"library": "2", "room": "9", "seat": "109"},
+        {"library": "2", "room": "x", "seat": "x"},
+    ]
+
+
 def test_load_accounts_rejects_more_than_twenty_accounts(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     payload = {"accounts": [{"id": f"id-{i}", "account": str(i), "password": "secret"} for i in range(MAX_ACCOUNTS + 1)]}

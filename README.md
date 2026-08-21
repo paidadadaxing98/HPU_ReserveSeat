@@ -143,72 +143,130 @@ Invoke-RestMethod http://127.0.0.1:8765/api/v1/commands -Method Post -Headers $h
 ```
 
 只有 `enabled: true` 的账号才会被加载和测试。多账号配置下不写 `--account` 会提示必须指定账号；第一个账号使用 `--account account01`。
+例如第二个已有账号使用 `--account account02`。
 
-先初始化账号。未提供学习窗口时使用默认的 `08:00-12:00`、`14:30-18:30`、`19:30-22:00`，向导会询问是否修改；也可以用重复的 `--period` 预填窗口。初始化过程只验证登录和接口，不预约任何座位：
+### 新账号完整链路
 
-```powershell
-.\.venv\Scripts\python.exe scripts/initialize_account.py --account account02
+下面按“手动写入账号密码 -> 初始化 -> 预览 -> 真实提交”的顺序模拟一个新账号。账号密码只写在本机 `accounts.json`，不要发送到聊天、日志或 Git。
+
+1. 手动编辑项目根目录的 `accounts.json`，增加一个新账号对象。`id` 是程序命令中使用的账号 ID，不是学号：
+
+```json
+{
+  "id": "account03",
+  "enabled": true,
+  "account": "在这里填写统一认证账号",
+  "password": "在这里填写统一认证密码",
+  "wecom_webhook": ""
+}
 ```
 
-先测试登录：
+新账号不需要手动填写 `initialization`。初始化向导会把学习窗口、座位偏好和位置偏好写回这个账号；初始化命令只验证登录和预约接口，不会预约或取消座位。
+
+2. 先验证登录：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\test_login.py --account account02
+.\.venv\Scripts\python.exe scripts/test_login.py --account account03
 ```
 
-登录诊断：
+登录成功后会复用 `accounts/account03/browser-profile`。如需查看当前页面和登录状态，可以运行诊断命令；诊断结束后需要在终端按回车关闭浏览器：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\diagnose_login.py account02
+.\.venv\Scripts\python.exe scripts/diagnose_login.py account03
 ```
 
-预约预览，不提交：
+3. 执行只读初始化：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\preview_reservation.py `
-  --account account02 `
-  --room "4层计算机类借阅区" `
-  --date "2026-08-21" `
-  --start "09:00" `
+.\.venv\Scripts\python.exe scripts/initialize_account.py --account account03
+```
+
+初始化交互顺序和填写方式如下：
+
+初始化先自动打开图书馆选择控件并采集可见图书馆，不需要用户第一次手动点击下拉框。程序会自动展开图书馆下拉框并显示编号，例如 `1. 南校区第一图书馆`、`2. 南校区第二图书馆`，用户只需输入编号或完整名称。未采集到图书馆时初始化失败，不会保存为已完成。
+
+座位偏好分为三条交互分支。每条分支只询问它需要的信息，不会重复追问位置：
+
+1. **随机座位**：只选择图书馆。楼层和阅览室留空；预约时在该图书馆可用阅览室中按时间种子随机选择阅览室，再在该阅览室的空闲座位中按时间种子随机选择座位。
+2. **楼层随机**：选择图书馆后只询问一次楼层，例如 `4F`。程序会展示自动采集到的该层阅览室，但不再要求再次编号选择；后续从该层第一个阅览室开始按账号独立状态轮询分配，座位在选定阅览室的空闲座位中随机选择。
+3. **具体座位**：先选择图书馆和阅览室，再输入座位号优先列表，例如 `169 168 170`。程序按列表顺序尝试仍然空闲且满足时间的座位；列表中的座位都不可用时安全停止或按当前候选策略继续检查，不会把已占用座位提交给网站。
+
+如果图书馆暂时没有读取到阅览室，程序保存空阅览室偏好，预约时再读取并按规则分配；图书馆本身必须成功读取并选择。初始化过程中不会选择座位、打开预约时间或点击“立即预约”。
+
+### 初始化命令参数约定
+
+初始化命令保留现有 `--account` 和 `--period` 参数，并增加以下命令行表达方式。`--seat` 可以重复使用，`--time` 一次接收上午、下午、晚上三个值；`x` 表示该位置或时段不指定，继续使用交互选择、已有配置或默认值。
+
+```powershell
+# 查看完整参数说明
+.\.venv\Scripts\python.exe scripts\initialize_account.py --help
+
+# 座位规则：图书馆编号-阅览室目录编号-座位号；--seat 可重复
+.\.venv\Scripts\python.exe scripts\initialize_account.py `
+  --account account03 `
+  --seat 2-x-x `
+  --seat 2-9-x `
+  --seat 2-9-109
+
+# --time 三个值依次为 morning、afternoon、evening；x 保留默认/已有配置
+.\.venv\Scripts\python.exe scripts\initialize_account.py `
+  --account account03 `
+  --time 08:00-12:00 x 19:30-22:00
+```
+
+`--seat` 规则解释：
+
+- `2-x-x`：第二图书馆，阅览室和座位不指定，在该图书馆范围内随机；
+- `2-9-x`：第二图书馆的阅览室目录第 9 项，座位随机；
+- `2-9-109`：第二图书馆的阅览室目录第 9 项，优先选择 109 号座位；
+- 多条规则同时匹配时按精确程度优先：`图书馆-阅览室-座位` > `图书馆-阅览室-x` > `图书馆-x-x`；同等精确程度保留命令行出现顺序。
+
+`--time` 必须按“上午、下午、晚上”提供三个值。每个值使用 `HH:MM-HH:MM`，并按 30 分钟粒度填写；`x` 表示该时段不覆盖，继续使用已有配置或默认的 `08:00-12:00`、`14:30-18:30`、`19:30-22:00`。现有的重复 `--period morning=...`、`--period afternoon=...`、`--period evening=...` 写法继续保留，适合只覆盖部分时段。
+
+以上 `--seat`、三值 `--time` 已由初始化命令解析、保存并接入预约候选选择；实际参数和示例也可以通过 `--help` 查看。
+
+初始化完成后会保存登录状态、首页状态、“我的预约”接口能力、最后验证时间以及上述偏好。此步骤不会选择座位、打开预约时间或点击“立即预约”。
+
+4. 先做一次真实流程预览，不提交预约。因为阅览室和座位偏好已经保存在初始化配置中，下面命令可以省略 `--room` 和 `--preferred`：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/preview_reservation.py `
+  --account account03 `
+  --date "2026-08-22" `
+  --start "08:30" `
+  --end "12:00"
+```
+
+预览会打开独立浏览器、读取当天预约、按初始化的位置和座位偏好选择候选项，并停在“立即预约”前，不会提交。若需要临时指定阅览室或座位，可以额外添加 `--room "阅览室名称"` 和 `--preferred 169 168 170`。
+
+5. 调试真实提交时，使用 `--confirm-submit`，程序会要求手动输入大写 `SUBMIT`：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/preview_reservation.py `
+  --account account03 `
+  --date "2026-08-22" `
+  --start "08:30" `
   --end "12:00" `
-  --preferred 169 168 170
-```
-
-调试提交，需要手动输入 `SUBMIT`：
-
-```powershell
-.\.venv\Scripts\python.exe scripts\preview_reservation.py `
-  --account account02 `
-  --room "4层计算机类借阅区" `
-  --date "2026-08-21" `
-  --start "09:00" `
-  --end "12:00" `
-  --preferred 169 168 170 `
   --submit `
   --confirm-submit
 ```
 
-确认无误后，真实自动提交：
+只有确认浏览器中选择的图书馆、阅览室、座位和时间都正确后，才输入 `SUBMIT`。直接回车会保持预览，不提交。
+
+6. 确认预览和调试提交无误后，执行真实自动提交：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\preview_reservation.py `
-  --account account02 `
-  --room "4层计算机类借阅区" `
-  --date "2026-08-21" `
-  --start "09:00" `
+.\.venv\Scripts\python.exe scripts/preview_reservation.py `
+  --account account03 `
+  --date "2026-08-22" `
+  --start "08:30" `
   --end "12:00" `
-  --preferred 169 168 170 `
   --submit
 ```
 
-重新采集结束时间时：
+真实提交后，程序会读取页面结果并查询“我的预约”核验。成功、明确失败或结果不明确都会保存到 `accounts/account03/seat_assistant.db`，已提交但无法立即核验时不会自动重复提交。请把命令中的日期替换为当前允许预约的当天或次日日期，时间必须按 30 分钟填写并位于初始化学习窗口内。
 
-```powershell
-.\.venv\Scripts\python.exe scripts\capture_end_times.py `
-  --account account02 `
-  --room "4层计算机类借阅区" `
-  --date "2026-08-21"
-```
+如果初始化时选择了 `floor` 或 `seats`，真实提交命令仍然相同；程序会使用已保存的座位偏好。若初始化后想重新选择偏好，再运行一次初始化命令即可。
 
 调度服务会在每天前一天 `19:30` 按账号顺序运行次日任务。使用 `accounts.json` 的账号尚未初始化时会安全停止并提示先初始化，不会进入选座或提交流程；不创建 `accounts.json` 时，旧的 `.env` 单账号模式默认使用“南校区第二图书馆”，可以直接运行。当前企业微信机器人是单向通知，尚未接入机器人入站命令或微信小程序双向控制。
 

@@ -3,6 +3,8 @@ import json
 import os
 from pathlib import Path
 
+from .initialization import parse_seat_rule, sort_seat_rules
+
 
 MAX_ACCOUNTS = 20
 
@@ -58,6 +60,7 @@ class Settings:
     periods: dict[str, Period] = field(default_factory=_default_periods)
     preferred_seats: tuple[str, ...] = ()
     seat_preference: dict = field(default_factory=dict)
+    seat_rules: list[dict] = field(default_factory=list)
     location_preference: dict = field(default_factory=dict)
     require_initialization: bool = False
 
@@ -94,6 +97,7 @@ class AccountSettings:
     periods: dict[str, Period] = field(default_factory=_default_periods)
     preferred_seats: tuple[str, ...] = ()
     seat_preference: dict = field(default_factory=dict)
+    seat_rules: list[dict] = field(default_factory=list)
     location_preference: dict = field(default_factory=dict)
 
 
@@ -141,16 +145,55 @@ def _normalize_location_preference(raw, account_id: str = "<空>") -> dict:
     return {"library": library, "floor": floor, "room": room}
 
 
-def _parse_initialization(entry: dict, inherited: dict | None = None) -> tuple[dict[str, Period], tuple[str, ...], dict, dict]:
+def _normalize_seat_rules(raw, account_id: str = "<空>") -> list[dict]:
+    if raw is None:
+        return []
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"账号 {account_id} 的 seat_rules 必须是列表")
+    rules = []
+    for value in raw:
+        try:
+            if isinstance(value, str):
+                rules.append(parse_seat_rule(value))
+                continue
+            if not isinstance(value, dict):
+                raise ValueError("规则必须是字符串或对象")
+            library = str(value.get("library", "")).strip()
+            room = str(value.get("room", "")).strip()
+            seat = str(value.get("seat", "")).strip()
+            if not library:
+                raise ValueError("规则必须指定图书馆")
+            if library.isdigit() and room in {"", "x"} and seat in {"", "x"}:
+                rules.append(parse_seat_rule(f"{library}-x-x"))
+            elif library.isdigit() and room.isdigit() and seat in {"", "x"}:
+                rules.append(parse_seat_rule(f"{library}-{room}-x"))
+            elif library.isdigit() and room.isdigit() and seat.isdigit():
+                rules.append(parse_seat_rule(f"{library}-{room}-{seat}"))
+            else:
+                rules.append({
+                    "library": library,
+                    "room": "x" if room in {"", "x"} else room,
+                    "seat": "x" if seat in {"", "x"} else seat,
+                    **({"library_index": value["library_index"]} if "library_index" in value else {}),
+                    **({"room_index": value["room_index"]} if "room_index" in value else {}),
+                })
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(f"账号 {account_id} 的座位规则无效：{value}") from exc
+    return sort_seat_rules(rules)
+
+
+def _parse_initialization(entry: dict, inherited: dict | None = None) -> tuple[dict[str, Period], tuple[str, ...], dict, list[dict], dict]:
     source = inherited or {
         "periods": _default_periods(),
         "preferred_seats": (),
         "seat_preference": {},
+        "seat_rules": [],
         "location_preference": {},
     }
     periods = _copy_periods(source["periods"])
     preferred = tuple(str(value).strip() for value in source["preferred_seats"] if str(value).strip())
     seat_preference = dict(source.get("seat_preference") or {})
+    seat_rules = list(source.get("seat_rules") or [])
     location_preference = dict(source.get("location_preference") or {})
     initialization = entry.get("initialization") or {}
     if not isinstance(initialization, dict):
@@ -165,6 +208,8 @@ def _parse_initialization(entry: dict, inherited: dict | None = None) -> tuple[d
         seat_preference = _normalize_seat_preference(initialization.get("seat_preference"), preferred, str(entry.get("id", "<空>")))
         if seat_preference.get("mode") == "seats":
             preferred = tuple(seat_preference["seats"])
+    if "seat_rules" in initialization:
+        seat_rules = _normalize_seat_rules(initialization.get("seat_rules"), str(entry.get("id", "<空>")))
     location_value = initialization.get("location_preference")
     if location_value is None and any(key in initialization for key in ("library", "floor", "room")):
         location_value = {
@@ -187,7 +232,7 @@ def _parse_initialization(entry: dict, inherited: dict | None = None) -> tuple[d
         if len(arrival) != 2 or len(departure) != 2 or not default:
             raise ValueError(f"账号 {entry.get('id', '<空>')} 的时段配置无效：{name}")
         periods[name] = Period(arrival, departure, default)
-    return periods, preferred, seat_preference, location_preference
+    return periods, preferred, seat_preference, seat_rules, location_preference
 
 
 def _resolve_initialization(entry: dict, by_id: dict[str, dict], trail: tuple[str, ...] = ()) -> tuple[dict[str, Period], tuple[str, ...], dict]:
@@ -201,11 +246,12 @@ def _resolve_initialization(entry: dict, by_id: dict[str, dict], trail: tuple[st
         parent = by_id.get(str(parent_id))
         if parent is None:
             raise ValueError(f"账号 {account_id} 继承的模板账号不存在：{parent_id}")
-        parent_periods, parent_seats, parent_preference, parent_location = _resolve_initialization(parent, by_id, (*trail, account_id))
+        parent_periods, parent_seats, parent_preference, parent_rules, parent_location = _resolve_initialization(parent, by_id, (*trail, account_id))
         inherited = {
             "periods": parent_periods,
             "preferred_seats": parent_seats,
             "seat_preference": parent_preference,
+            "seat_rules": parent_rules,
             "location_preference": parent_location,
         }
     return _parse_initialization(entry, inherited)
@@ -289,7 +335,7 @@ def load_accounts(path: str | None = None) -> list[AccountSettings]:
             raise ValueError(f"数据库路径重复：{database}")
         profile_paths.add(profile)
         database_paths.add(database)
-        periods, preferred_seats, seat_preference, location_preference = _resolve_initialization(entry, entries_by_id)
+        periods, preferred_seats, seat_preference, seat_rules, location_preference = _resolve_initialization(entry, entries_by_id)
         accounts.append(AccountSettings(
             id=account_id,
             account=account,
@@ -301,6 +347,7 @@ def load_accounts(path: str | None = None) -> list[AccountSettings]:
             periods=periods,
             preferred_seats=preferred_seats,
             seat_preference=seat_preference,
+            seat_rules=seat_rules,
             location_preference=location_preference,
         ))
     return accounts
@@ -364,6 +411,7 @@ def load_account_settings(account_id: str | None = None) -> Settings:
         periods=_copy_periods(selected.periods),
         preferred_seats=selected.preferred_seats,
         seat_preference=dict(selected.seat_preference),
+        seat_rules=[dict(rule) for rule in selected.seat_rules],
         location_preference=dict(selected.location_preference),
         require_initialization=config_path.exists(),
     )
