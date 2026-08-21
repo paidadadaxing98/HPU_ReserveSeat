@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from seat_assistant.commands import Command
 from seat_assistant.config import Settings
 from seat_assistant.reservation import SeatResult
@@ -48,8 +50,40 @@ def test_reserve_period_blocks_another_period_when_day_already_has_booking(tmp_p
 
     assert result.success is False
     assert result.conclusive is True
-    assert "当天已有预约" in result.message
+    assert "尚未结束" in result.message
     assert len(adapter.reserve_calls) == 1
+
+
+def test_reserve_period_waits_until_previous_period_ends(tmp_path):
+    adapter = FakeAdapter()
+    service, repo = make_service(tmp_path, adapter)
+    repo.save_reservation("2026-08-21", "morning", "reserved", "08:30", "12:00", "阅览室", "169", "ok")
+
+    result = service.reserve_period(
+        "2026-08-21",
+        "afternoon",
+        now=datetime(2026, 8, 21, 11, 59),
+    )
+
+    assert result.success is False
+    assert result.conclusive is True
+    assert "未结束" in result.message
+    assert adapter.reserve_calls == []
+
+
+def test_reserve_period_allows_next_period_after_previous_period_ends(tmp_path):
+    adapter = FakeAdapter()
+    service, repo = make_service(tmp_path, adapter)
+    repo.save_reservation("2026-08-21", "morning", "reserved", "08:30", "12:00", "阅览室", "169", "ok")
+
+    result = service.reserve_period(
+        "2026-08-21",
+        "afternoon",
+        now=datetime(2026, 8, 21, 12, 0),
+    )
+
+    assert result.success is True
+    assert [call[1] for call in adapter.reserve_calls] == ["afternoon"]
 
 
 def test_reserve_period_does_not_retry_an_uncertain_same_day_booking(tmp_path):
@@ -214,6 +248,21 @@ def test_fourth_success_is_skipped_after_three_successes(tmp_path):
     assert result.success is False
     assert result.conclusive is True
     assert "成功预约次数已达到" in result.message
+
+
+def test_fifth_success_is_allowed_but_sixth_is_blocked(tmp_path):
+    adapter = FakeAdapter()
+    repo = Repository(str(tmp_path / "db.sqlite"), account_id="alice")
+    service = AssistantService(Settings(control_token="local-token", daily_success_limit=5), repo, adapter)
+    for index in range(4):
+        assert repo.record_successful_booking("2026-08-21", f"period{index}") is True
+
+    fifth = service.reserve_period("2026-08-21", "period05", quota_day="2026-08-21")
+    assert fifth.success is True
+
+    sixth = service.reserve_period("2026-08-22", "morning", quota_day="2026-08-21")
+    assert sixth.success is False
+    assert "达到 5 次" in sixth.message
 
 
 def test_reusing_existing_booking_is_allowed_when_success_quota_is_full(tmp_path):

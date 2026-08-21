@@ -91,6 +91,17 @@ def test_parse_period_arguments_accepts_partial_overrides():
     }
 
 
+def test_parse_time_arguments_accepts_optional_fourth_and_fifth_windows():
+    assert parse_time_arguments([
+        "08:00-10:00", "14:30-16:30", "19:30-21:30", "x", "22:00-23:00",
+    ]) == {
+        "morning": ("08:00", "10:00"),
+        "afternoon": ("14:30", "16:30"),
+        "evening": ("19:30", "21:30"),
+        "period05": ("22:00", "23:00"),
+    }
+
+
 def test_seat_preference_input_supports_random_floor_and_seat_list():
     assert seat_preference_from_input("random") == {"mode": "random"}
     assert seat_preference_from_input("floor", "4F") == {"mode": "floor", "floor": "4F"}

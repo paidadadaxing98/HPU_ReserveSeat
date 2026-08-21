@@ -3,7 +3,13 @@ import logging
 from urllib.request import Request, urlopen
 
 
-_PERIOD_LABELS = {"morning": "上午", "afternoon": "下午", "evening": "晚上"}
+_PERIOD_LABELS = {
+    "morning": "上午",
+    "afternoon": "下午",
+    "evening": "晚上",
+    "period04": "第4段",
+    "period05": "第5段",
+}
 
 
 def render_reservation(day: str, period: str, result, start: str, end: str) -> str:

@@ -37,3 +37,16 @@ def test_real_adapter_delegates_to_async_booking_runner():
 
     assert result.success is True
     assert result.seat == "169"
+
+
+def test_real_adapter_delegates_current_reservation_query_to_async_runner():
+    async def current_runner(settings, day):
+        assert settings.account_id == "alice"
+        return [{"date": day, "begin": "08:30", "end": "12:00", "stat": "RESERVE"}]
+
+    settings = type("Settings", (), {"account_id": "alice"})()
+    adapter = PlaywrightReservation(settings=settings, current_runner=current_runner)
+
+    assert adapter.current_reservations("2026-08-22") == [{
+        "date": "2026-08-22", "begin": "08:30", "end": "12:00", "stat": "RESERVE",
+    }]

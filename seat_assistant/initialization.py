@@ -10,6 +10,7 @@ from .storage import Repository
 
 
 PERIOD_NAMES = ("morning", "afternoon", "evening")
+ALL_PERIOD_NAMES = (*PERIOD_NAMES, "period04", "period05")
 DEFAULT_PERIOD_WINDOWS = {
     "morning": ("08:00", "12:00"),
     "afternoon": ("14:30", "18:30"),
@@ -57,7 +58,7 @@ def parse_period_arguments(values: list[str] | None) -> dict[str, tuple[str, str
             raise ValueError("学习窗口格式必须是 period=HH:MM-HH:MM")
         name, window = value.split("=", 1)
         name = name.strip().lower()
-        if name not in PERIOD_NAMES:
+        if name not in ALL_PERIOD_NAMES:
             raise ValueError(f"未知学习时段：{name}")
         parts = window.strip().split("-", 1)
         if len(parts) != 2:
@@ -76,10 +77,11 @@ def parse_time_arguments(values: list[str] | None) -> dict[str, tuple[str, str]]
     the returned overrides.
     """
     values = list(values or [])
-    if len(values) != len(PERIOD_NAMES):
-        raise ValueError("--time 必须依次提供上午、下午、晚上三个值")
+    if len(values) not in {len(PERIOD_NAMES), len(ALL_PERIOD_NAMES)}:
+        raise ValueError("--time 必须提供 3 个值，或依次提供 5 个值（含第 4、5 段）")
     parsed = {}
-    for name, value in zip(PERIOD_NAMES, values):
+    names = PERIOD_NAMES if len(values) == len(PERIOD_NAMES) else ALL_PERIOD_NAMES
+    for name, value in zip(names, values):
         if str(value).strip().lower() in {"x", "保持", "不变"}:
             continue
         parsed[name] = parse_period_arguments([f"{name}={value}"])[name]
@@ -247,11 +249,17 @@ def choose_library_from_input(libraries: list[str], value: str) -> str:
     raise ValueError(f"未找到图书馆：{target}")
 
 
-def periods_to_config(periods: dict[str, tuple[str, str]]) -> dict:
+def periods_to_config(
+    periods: dict[str, tuple[str, str]],
+    enabled: dict[str, bool] | None = None,
+) -> dict:
     result = {}
-    for name in PERIOD_NAMES:
+    for name in ALL_PERIOD_NAMES:
+        if name not in periods:
+            continue
         start, end = periods[name]
         result[name] = {
+            "enabled": bool((enabled or {}).get(name, name in PERIOD_NAMES)),
             "arrival_window": [start, end],
             "departure_window": [end, end],
             "default_arrival": _default_arrival(name, start),
@@ -266,6 +274,7 @@ def update_account_initialization(
     seat_preference: dict,
     location_preference: dict | None = None,
     seat_rules: list[dict] | None = None,
+    enabled_periods: dict[str, bool] | None = None,
 ) -> None:
     config_path = Path(path)
     payload = json.loads(config_path.read_text(encoding="utf-8"))
@@ -278,7 +287,7 @@ def update_account_initialization(
     initialization = target.setdefault("initialization", {})
     if not isinstance(initialization, dict):
         raise ValueError(f"账号 {account_id} 的 initialization 必须是对象")
-    initialization["periods"] = periods_to_config(periods)
+    initialization["periods"] = periods_to_config(periods, enabled_periods)
     initialization["seat_preference"] = seat_preference
     if seat_rules is not None:
         initialization["seat_rules"] = seat_rules
@@ -340,9 +349,16 @@ async def run_interactive_initialization(
     periods = {
         name: tuple(period.arrival_window)
         for name, period in settings.periods.items()
-        if name in PERIOD_NAMES
+        if name in ALL_PERIOD_NAMES
+    }
+    enabled_periods = {
+        name: bool(getattr(period, "enabled", True))
+        for name, period in settings.periods.items()
+        if name in ALL_PERIOD_NAMES
     }
     periods.update(period_overrides or {})
+    for name in period_overrides or {}:
+        enabled_periods[name] = True
 
     current_location = getattr(settings, "location_preference", None) or {}
     current_preference = getattr(settings, "seat_preference", None) or {}
@@ -481,7 +497,9 @@ async def run_interactive_initialization(
                 except ValueError as exc:
                     output_fn(f"输入无效：{exc}请重新输入。")
     location = location_preference_from_input(library, floor, room)
-    update_account_initialization(config_path, account_id, periods, preference, location, resolved_rules)
+    update_account_initialization(
+        config_path, account_id, periods, preference, location, resolved_rules, enabled_periods
+    )
     repository.save_initialization_state(
         status="ready",
         login_verified=True,
@@ -531,8 +549,7 @@ def _minutes(value: str) -> int:
 
 
 def _default_arrival(name: str, start: str) -> str:
-    offsets = {"morning": 30, "afternoon": 30, "evening": 30}
-    return _from_minutes(_minutes(start) + offsets[name])
+    return _from_minutes(_minutes(start) + 30)
 
 
 def _from_minutes(value: int) -> str:

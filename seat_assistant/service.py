@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 import uuid
 
 from .commands import Command
@@ -8,6 +8,7 @@ from .notifications import send_reservation_notification
 from .initialization import initialization_skip_message
 from .reservation import SeatResult
 from .storage import Repository
+from .submission import active_reservation_interval, active_reservations_for_day
 
 
 class AssistantService:
@@ -15,11 +16,18 @@ class AssistantService:
         self.settings, self.repo, self.adapter, self.notifier = settings, repo, adapter, notifier
         self.account_id = settings.account_id
 
-    def run_once(self, day: str):
+    def run_once(self, day: str, now: datetime | None = None):
         from .scheduler import run_once
-        return run_once(self, day)
+        return run_once(self, day, now=now)
 
-    def reserve_period(self, day: str, period_name: str, arrival_override: str | None = None, quota_day: str | None = None):
+    def reserve_period(
+        self,
+        day: str,
+        period_name: str,
+        arrival_override: str | None = None,
+        quota_day: str | None = None,
+        now: datetime | None = None,
+    ):
         if getattr(self.settings, "require_initialization", False):
             state = self.repo.initialization_state()
             if state["status"] != "ready":
@@ -33,12 +41,17 @@ class AssistantService:
             return SeatResult(True, existing["room"], existing["seat"], "已存在预约")
         if existing and existing["status"] == "uncertain":
             return SeatResult(False, existing["room"], existing["seat"], "同一天已有一次预约，但上次结果不明确；已停止重试", conclusive=False)
+        now = now or datetime.now()
+        live_block = self._live_reservation_block(day, period_name, now)
+        if live_block is not None:
+            return live_block
         for record in self.repo.reservations(day):
             record_period, status, _, _, room, seat = record
             if record_period != period_name and status in {"reserved", "uncertain"}:
                 if status == "uncertain":
                     return SeatResult(False, room, seat, "同一天已有一次预约，但上次结果不明确；已停止重试", conclusive=False)
-                return SeatResult(False, room, seat, "当天已有预约，学校限制同一天只能预约一个时间段", conclusive=True)
+                if not _reservation_has_ended(day, record[3], now):
+                    return SeatResult(False, room, seat, "前一个预约尚未结束，当前账号暂不能预约下一时段", conclusive=True)
         if self.repo.successful_booking_count(quota_day) >= self.settings.daily_success_limit:
             return SeatResult(False, message=f"账号今日成功预约次数已达到 {self.settings.daily_success_limit} 次，跳过本次运行")
         expected = arrival_override or self.repo.default_override(period_name) or self.repo.learned_default(period_name, period.default_arrival)
@@ -60,6 +73,22 @@ class AssistantService:
             self.repo.record_successful_booking(quota_day, f"{period_name}:{uuid.uuid4().hex}")
         send_reservation_notification(self.notifier, day, period_name, result, start, end)
         return result
+
+    def _live_reservation_block(self, day: str, period_name: str, now: datetime) -> SeatResult | None:
+        query = getattr(self.adapter, "current_reservations", None)
+        if query is None:
+            return None
+        try:
+            records = query(day)
+        except Exception as exc:
+            return SeatResult(False, message=f"无法读取‘我的预约’确认当前状态：{exc}；已停止后续预约", conclusive=False)
+        for item in active_reservations_for_day(records, day):
+            start_minutes, end_minutes = active_reservation_interval(item)
+            if end_minutes is None:
+                return SeatResult(False, message="当前有效预约缺少结束时间，无法安全判断是否能预约下一时段；已停止", conclusive=False)
+            if not _reservation_has_ended(day, _format_minutes(end_minutes), now):
+                return SeatResult(False, message="前一个预约尚未结束，当前账号暂不能预约下一时段", conclusive=True)
+        return None
 
     def apply_command(self, command: Command, day: str | None = None):
         day = day or date.today().isoformat()
@@ -137,3 +166,15 @@ class AssistantService:
 
 def _clock_minutes(value):
     return value.hour * 60 + value.minute
+
+
+def _reservation_has_ended(day: str, end: str, now: datetime) -> bool:
+    try:
+        end_at = datetime.combine(date.fromisoformat(day), parse_hhmm(end))
+    except (TypeError, ValueError):
+        return False
+    return now >= end_at
+
+
+def _format_minutes(value: int) -> str:
+    return f"{value // 60:02d}:{value % 60:02d}"

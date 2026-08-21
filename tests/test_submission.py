@@ -1,4 +1,6 @@
-from seat_assistant.submission import active_reservations_for_day, confirmation_required, day_reservations, end_time_response_matches_start, end_times_request_url, end_times_response_matches, find_matching_reservation, find_reservation_by_day_and_time, find_similar_reservation, history_page_records, local_reservation_blocks_retry, normalize_time_option, reservation_matches, requested_times_available, submission_settled, time_option_id, time_options, time_to_minutes, time_values
+from datetime import datetime
+
+from seat_assistant.submission import active_reservations_for_day, blocking_active_reservations_for_day, confirmation_required, day_reservations, end_time_response_matches_start, end_times_request_url, end_times_response_matches, find_matching_reservation, find_reservation_by_day_and_time, find_similar_reservation, history_page_records, local_reservation_blocks_retry, normalize_time_option, reservation_matches, requested_times_available, submission_settled, time_option_id, time_options, time_to_minutes, time_values
 
 
 def test_submission_only_prompts_for_explicit_debug_confirmation():
@@ -312,6 +314,25 @@ def test_active_reservations_for_day_does_not_require_time_overlap():
     ]
 
     assert active_reservations_for_day(reservations, "2026-08-20") == [reservations[0]]
+
+
+def test_blocking_active_reservations_excludes_reservations_that_already_ended():
+    records = [
+        {"date": "2026-08-20", "begin": "09:00", "end": "12:00", "stat": "RESERVE"},
+        {"date": "2026-08-20", "begin": "15:00", "end": "18:00", "stat": "RESERVE"},
+    ]
+
+    assert blocking_active_reservations_for_day(
+        records, "2026-08-20", now=datetime(2026, 8, 20, 14, 0)
+    ) == [records[1]]
+
+
+def test_blocking_active_reservations_keeps_missing_end_time_for_safety():
+    record = {"date": "2026-08-20", "begin": "09:00", "stat": "RESERVE"}
+
+    assert blocking_active_reservations_for_day(
+        [record], "2026-08-20", now=datetime(2026, 8, 20, 14, 0)
+    ) == [record]
 
 
 def test_day_reservations_keeps_all_statuses_for_reporting():

@@ -6,7 +6,7 @@ import os
 import re
 import sys
 import uuid
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 from playwright.async_api import async_playwright
@@ -29,7 +29,7 @@ from seat_assistant.preview import choose_room_for_preference, layout_from_respo
 from seat_assistant.reservation import SeatResult
 from seat_assistant.seat_inventory import seats_from_layout
 from seat_assistant.storage import Repository
-from seat_assistant.submission import active_reservations_for_day, confirmation_required, day_reservations, end_time_response_matches_start, find_matching_reservation, find_reservation_by_day_and_time, find_similar_reservation, history_page_records, local_reservation_blocks_retry, normalize_time_option, requested_times_available, reservation_matches, submission_settled, time_option_id, time_values, validate_half_hour_time
+from seat_assistant.submission import active_reservations_for_day, blocking_active_reservations_for_day, confirmation_required, day_reservations, end_time_response_matches_start, find_matching_reservation, find_reservation_by_day_and_time, find_similar_reservation, history_page_records, local_reservation_blocks_retry, normalize_time_option, requested_times_available, reservation_matches, submission_settled, time_option_id, time_values, validate_half_hour_time
 
 SITE_URL = os.getenv("SEAT_LOGIN_URL", "https://seatlib.hpu.edu.cn/libseat/")
 CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
@@ -169,12 +169,13 @@ async def main(args):
                 }]
             existing = await fetch_user_reservations(page, api_auth)
             print(f"当天预约记录：{daily_reservation_details(existing, args.date) or '无'}")
-            local_record = repository.get_reservation(args.date, "manual")
+            reservation_key = _reservation_storage_key(args)
+            local_record = repository.get_reservation(args.date, reservation_key)
             if local_reservation_blocks_retry(local_record):
                 print(f"本地记录显示本次日期已有{local_record['status']}提交，停止以避免重复预约：{local_record['start']}-{local_record['end']}")
                 await context.close()
                 return
-            active_today = active_reservations_for_day(existing, args.date)
+            active_today = blocking_active_reservations_for_day(existing, args.date, datetime.now())
             if active_today:
                 details = "；".join(reservation_summary(item) for item in active_today)
                 print(f"当天已经存在有效预约，学校限制一次只能预约一个时间段，跳过本次预约：{details}")
@@ -248,13 +249,14 @@ async def main(args):
         # similar reservation after the homepage check.
         existing = await fetch_user_reservations(page, api_auth)
         print(f"提交前当天预约记录：{daily_reservation_details(existing, args.date) or '无'}")
-        local_record = repository.get_reservation(args.date, "manual")
+        reservation_key = _reservation_storage_key(args)
+        local_record = repository.get_reservation(args.date, reservation_key)
         if local_reservation_blocks_retry(local_record):
             print(f"提交前发现本地已有{local_record['status']}提交，取消本次操作以避免重复预约：{local_record['start']}-{local_record['end']}")
             await close_time_dialog(page)
             await context.close()
             return
-        active_today = active_reservations_for_day(existing, args.date)
+        active_today = blocking_active_reservations_for_day(existing, args.date, datetime.now())
         if active_today:
             details = "；".join(reservation_summary(item) for item in active_today)
             print(f"提交前发现当天已有有效预约，学校限制一次只能预约一个时间段，取消本次提交：{details}")
@@ -281,7 +283,7 @@ async def main(args):
         except Exception:
             print("提交请求超过 30 秒仍未结束，结果不明确；不会重复提交。")
             repository.save_reservation(
-                args.date, "manual", "pending", args.start, args.end, args.room, selected.number,
+                args.date, reservation_key, "pending", args.start, args.end, args.room, selected.number,
                 "提交请求超过 30 秒仍未结束",
             )
             send_preview_notification(
@@ -316,7 +318,7 @@ async def main(args):
         if verification_status == "success":
             if record_success_quota:
                 repository.record_successful_booking(date.today().isoformat(), f"{args.date}:{selected.number}:{uuid.uuid4().hex}")
-            repository.save_reservation(args.date, "manual", "reserved", args.start, args.end, args.room, selected.number, verification_message)
+            repository.save_reservation(args.date, reservation_key, "reserved", args.start, args.end, args.room, selected.number, verification_message)
             print(f"核验成功：{args.date}，{args.room}，座位 {selected.number}，{args.start}-{args.end}")
             send_preview_notification(
                 notifier,
@@ -332,7 +334,7 @@ async def main(args):
             )
         elif verification_status == "pending":
             print(f"预约已提交，待核验：{verification_message}")
-            repository.save_reservation(args.date, "manual", "pending", args.start, args.end, args.room, selected.number, verification_message)
+            repository.save_reservation(args.date, reservation_key, "pending", args.start, args.end, args.room, selected.number, verification_message)
             send_preview_notification(
                 notifier,
                 args,
@@ -340,7 +342,7 @@ async def main(args):
             )
         else:
             print(f"核验结果不明确：{verification_message or '请在‘我的预约’页面手动确认'}；程序不会重复提交。")
-            repository.save_reservation(args.date, "manual", "uncertain", args.start, args.end, args.room, selected.number, verification_message or "提交后核验结果不明确")
+            repository.save_reservation(args.date, reservation_key, "uncertain", args.start, args.end, args.room, selected.number, verification_message or "提交后核验结果不明确")
             send_preview_notification(
                 notifier,
                 args,
@@ -446,6 +448,7 @@ async def run_scheduled_reservation(settings, day: str, period: str, start: str,
         end=end,
         preferred=[],
         period=period,
+        reservation_key=period or "manual",
         submit=True,
         confirm_submit=False,
         interactive=False,
@@ -456,7 +459,7 @@ async def run_scheduled_reservation(settings, day: str, period: str, start: str,
         await main(args)
     except Exception as exc:
         return SeatResult(False, message=f"定时预约流程异常：{exc}", conclusive=False)
-    record = repository.get_reservation(day, "manual")
+    record = repository.get_reservation(day, getattr(args, "reservation_key", period))
     if not record:
         return SeatResult(False, message="定时预约未产生可核验记录，已停止重复尝试", conclusive=False)
     if record["status"] == "reserved":
@@ -468,6 +471,34 @@ async def run_scheduled_reservation(settings, day: str, period: str, start: str,
         record["message"] or "定时预约结果不明确",
         conclusive=record["status"] == "failed",
     )
+
+
+async def fetch_scheduled_current_reservations(settings, day: str) -> list[dict]:
+    """Read current reservations for scheduling without selecting or submitting."""
+    account_settings = settings
+    profile = Path(account_settings.profile_path)
+    async with LockedBrowser(profile) as context:
+        page = context.pages[0] if context.pages else await context.new_page()
+        api_auth = {"headers": {}, "token": ""}
+        capture_tasks = set()
+
+        def capture_request(request):
+            task = asyncio.create_task(capture_page_request(api_auth, request))
+            capture_tasks.add(task)
+            task.add_done_callback(capture_tasks.discard)
+
+        page.on("request", capture_request)
+        await page.goto(account_settings.login_url, wait_until="domcontentloaded")
+        logged_in = await login_if_configured(page, account_settings)
+        if not logged_in and not is_seat_app_url(page.url):
+            raise RuntimeError("未能自动登录，无法读取当前预约")
+        await wait_for_authenticated_page(page, timeout_ms=30000)
+        records = await fetch_user_reservations(page, api_auth)
+        return day_reservations(records, day)
+
+
+def _reservation_storage_key(args) -> str:
+    return str(getattr(args, "reservation_key", None) or getattr(args, "period", None) or "manual")
 
 
 def send_preview_notification(notifier, args, result) -> bool:

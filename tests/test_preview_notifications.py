@@ -219,7 +219,7 @@ def test_scheduled_reservation_disables_interaction_and_script_quota_recording(m
     async def fake_main(args):
         captured.append(args)
         Repository(str(tmp_path / "account.sqlite"), args.account).save_reservation(
-            args.date, "manual", "reserved", args.start, args.end, "阅览室", "169", "已核验"
+            args.date, args.reservation_key, "reserved", args.start, args.end, "阅览室", "169", "已核验"
         )
 
     monkeypatch.setattr(preview, "main", fake_main)
@@ -230,6 +230,7 @@ def test_scheduled_reservation_disables_interaction_and_script_quota_recording(m
     assert result.success is True
     assert captured[0].interactive is False
     assert captured[0].record_success_quota is False
+    assert captured[0].reservation_key == "morning"
     assert Repository(str(tmp_path / "account.sqlite"), "alice").successful_booking_count("2026-08-21") == 0
 
 

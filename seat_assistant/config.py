@@ -26,6 +26,7 @@ class Period:
     arrival_window: tuple[str, str]
     departure_window: tuple[str, str]
     default_arrival: str
+    enabled: bool = True
 
 
 def _default_periods() -> dict[str, Period]:
@@ -33,6 +34,8 @@ def _default_periods() -> dict[str, Period]:
         "morning": Period(("08:00", "12:00"), ("12:00", "12:00"), "08:30"),
         "afternoon": Period(("14:30", "18:30"), ("18:30", "18:30"), "15:00"),
         "evening": Period(("19:30", "22:00"), ("22:00", "22:00"), "20:00"),
+        "period04": Period(("10:00", "12:00"), ("12:00", "12:00"), "10:30", False),
+        "period05": Period(("13:00", "15:00"), ("15:00", "15:00"), "13:30", False),
     }
 
 
@@ -48,7 +51,7 @@ class Settings:
     wecom_webhook: str = ""
     login_url: str = "https://seatlib.hpu.edu.cn/libseat/"
     max_reservations_per_run: int = 1
-    daily_success_limit: int = 3
+    daily_success_limit: int = 5
     account_interval_seconds: float = 15.0
     captcha_llm_enabled: bool = False
     captcha_llm_api_key: str = ""
@@ -69,8 +72,8 @@ class Settings:
             raise ValueError("control_token cannot be blank")
         if self.max_reservations_per_run != 1:
             raise ValueError("max_reservations_per_run 只能为 1")
-        if not 1 <= self.daily_success_limit <= 3:
-            raise ValueError("daily_success_limit 必须在 1 到 3 之间")
+        if not 1 <= self.daily_success_limit <= 5:
+            raise ValueError("daily_success_limit 必须在 1 到 5 之间")
         if self.account_interval_seconds < 0:
             raise ValueError("account_interval_seconds 不能小于 0")
         if not self.captcha_llm_base_url.startswith(("http://", "https://")):
@@ -103,7 +106,12 @@ class AccountSettings:
 
 def _copy_periods(periods: dict[str, Period]) -> dict[str, Period]:
     return {
-        name: Period(tuple(period.arrival_window), tuple(period.departure_window), period.default_arrival)
+        name: Period(
+            tuple(period.arrival_window),
+            tuple(period.departure_window),
+            period.default_arrival,
+            bool(getattr(period, "enabled", True)),
+        )
         for name, period in periods.items()
     }
 
@@ -231,7 +239,10 @@ def _parse_initialization(entry: dict, inherited: dict | None = None) -> tuple[d
         default = str(value.get("default_arrival", current.default_arrival)).strip()
         if len(arrival) != 2 or len(departure) != 2 or not default:
             raise ValueError(f"账号 {entry.get('id', '<空>')} 的时段配置无效：{name}")
-        periods[name] = Period(arrival, departure, default)
+        enabled = value.get("enabled", current.enabled)
+        if not isinstance(enabled, bool):
+            raise ValueError(f"账号 {entry.get('id', '<空>')} 的时段 enabled 必须是 true 或 false：{name}")
+        periods[name] = Period(arrival, departure, default, enabled)
     return periods, preferred, seat_preference, seat_rules, location_preference
 
 
@@ -365,7 +376,7 @@ def load_settings() -> Settings:
         wecom_webhook=os.getenv("SEAT_WECOM_WEBHOOK", ""),
         login_url=os.getenv("SEAT_LOGIN_URL", "https://seatlib.hpu.edu.cn/libseat/"),
         max_reservations_per_run=int(os.getenv("SEAT_MAX_RESERVATIONS_PER_RUN", "1")),
-        daily_success_limit=int(os.getenv("SEAT_DAILY_SUCCESS_LIMIT", "3")),
+        daily_success_limit=int(os.getenv("SEAT_DAILY_SUCCESS_LIMIT", "5")),
         account_interval_seconds=float(os.getenv("SEAT_ACCOUNT_INTERVAL_SECONDS", "15")),
         captcha_llm_enabled=os.getenv("SEAT_CAPTCHA_LLM_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
         captcha_llm_api_key=os.getenv("SEAT_CAPTCHA_LLM_API_KEY", "").strip(),

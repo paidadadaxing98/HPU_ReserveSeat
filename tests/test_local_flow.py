@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from seat_assistant.commands import Command
 from seat_assistant.config import Settings
 from seat_assistant.reservation import DryRunReservation
@@ -11,7 +13,7 @@ def test_local_flow_persists_booking_delay_and_cancellation(tmp_path):
     repo = Repository(str(database))
     service = AssistantService(Settings(control_token="local-token"), repo, DryRunReservation())
 
-    booking = run_once(service, "2026-08-21")
+    booking = run_once(service, "2026-08-21", now=datetime(2026, 8, 20, 19, 30))
     assert booking["morning"]["status"] == "reserved"
     assert repo.get_reservation("2026-08-21", "morning")["start"] == "08:30"
 

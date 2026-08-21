@@ -172,9 +172,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--time",
-        nargs=3,
-        metavar=("MORNING", "AFTERNOON", "EVENING"),
-        help="依次设置上午、下午、晚上窗口；用 x 保持原值，例如 10:00-12:00 x 19:00-21:00",
+        nargs="+",
+        metavar="WINDOW",
+        help="依次设置 3 个或 5 个时段窗口；第 4、5 段可用 x 保持关闭，例如 10:00-12:00 x 19:00-21:00 x x",
     )
     return parser.parse_args(argv)
 

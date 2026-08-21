@@ -1,4 +1,5 @@
 import re
+from datetime import datetime
 
 
 _CLOCK_RE = re.compile(r"(?<!\d)(\d{1,2}):([0-5]\d)(?!\d)")
@@ -121,6 +122,39 @@ def active_reservations_for_day(reservations: list[dict], day: str) -> list[dict
         item for item in reservations or []
         if isinstance(item, dict) and _extract_date(item) == day and _is_active_reservation(item)
     ]
+
+
+def blocking_active_reservations_for_day(
+    reservations: list[dict], day: str, now: datetime
+) -> list[dict]:
+    """Return active records that still block the next serial reservation."""
+    blocking = []
+    for item in active_reservations_for_day(reservations, day):
+        end_minutes = _extract_time(item, ("endTime", "end_time", "end", "finishTime", "finish"))
+        if end_minutes is None:
+            blocking.append(item)
+            continue
+        try:
+            end_at = datetime.combine(
+                datetime.fromisoformat(day).date(),
+                _minutes_to_time(end_minutes),
+            )
+        except ValueError:
+            blocking.append(item)
+            continue
+        if now < end_at:
+            blocking.append(item)
+    return blocking
+
+
+def active_reservation_interval(item: dict) -> tuple[int | None, int | None]:
+    """Return the active record's start/end minutes for scheduler safety checks."""
+    if not isinstance(item, dict) or not _is_active_reservation(item):
+        return None, None
+    return (
+        _extract_time(item, ("startTime", "start_time", "start", "beginTime", "begin")),
+        _extract_time(item, ("endTime", "end_time", "end", "finishTime", "finish")),
+    )
 
 
 def day_reservations(reservations: list[dict], day: str) -> list[dict]:
@@ -316,6 +350,10 @@ def _clock_minutes(value: str) -> int | None:
     if not match:
         return None
     return int(match.group(1)) * 60 + int(match.group(2))
+
+
+def _minutes_to_time(value: int):
+    return datetime.strptime(f"{value // 60:02d}:{value % 60:02d}", "%H:%M").time()
 
 
 def _value_text(value) -> str:

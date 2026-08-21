@@ -268,9 +268,38 @@ def test_load_accounts_rejects_empty_json_account_list(monkeypatch, tmp_path):
         load_accounts()
 
 
-def test_settings_reject_success_limit_above_three():
-    with pytest.raises(ValueError, match="1 到 3"):
-        Settings(control_token="local-token", daily_success_limit=4)
+def test_settings_reject_success_limit_above_five():
+    with pytest.raises(ValueError, match="1 到 5"):
+        Settings(control_token="local-token", daily_success_limit=6)
+
+
+def test_settings_allow_five_daily_successes_and_keep_two_optional_periods_disabled():
+    settings = Settings(control_token="local-token", daily_success_limit=5)
+
+    assert settings.periods["morning"].enabled is True
+    assert settings.periods["evening"].enabled is True
+    assert settings.periods["period04"].enabled is False
+    assert settings.periods["period05"].enabled is False
+
+
+def test_load_accounts_can_enable_a_fifth_period(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "accounts.json").write_text(json.dumps({"accounts": [{
+        "id": "alice", "account": "1001", "password": "secret",
+        "initialization": {"periods": {
+            "period04": {
+                "enabled": True,
+                "arrival_window": ["12:00", "14:00"],
+                "departure_window": ["14:00", "14:00"],
+                "default_arrival": "12:30",
+            },
+        }},
+    }]}), encoding="utf-8")
+
+    settings = load_account_settings("alice")
+
+    assert settings.periods["period04"].enabled is True
+    assert settings.periods["period04"].arrival_window == ("12:00", "14:00")
 
 
 def test_load_account_settings_requires_id_when_multiple_accounts_exist(monkeypatch, tmp_path):
