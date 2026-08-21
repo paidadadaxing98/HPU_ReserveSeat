@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 from seat_assistant.calibration import sanitize_url
 from seat_assistant.account_lock import AccountLock
+from seat_assistant.browser_session import LockedBrowser
 from seat_assistant.auth_flow import auth_header_names, browser_api_headers, captcha_image_selectors, captcha_input_selectors, captcha_kind_from_text, credentials_available, is_seat_app_url, library_selected, login_failure_message, normalize_library
 from seat_assistant.captcha_llm import CaptchaVisionError, QwenCaptchaClient
 from seat_assistant.config import _load_dotenv, load_account_settings
@@ -23,53 +24,26 @@ from seat_assistant.date_selection import date_option_matches, normalize_date
 from seat_assistant.end_times import parse_native_end_times
 from seat_assistant.booking_window import validate_booking_date
 from seat_assistant.notifications import WeComNotifier, send_reservation_notification
-from seat_assistant.preview import layout_from_response, layout_request_matches, normalize_room_name, preview_seat_candidates
+from seat_assistant.preview import choose_room_for_preference, layout_from_response, layout_request_matches, normalize_room_name, preview_seat_candidates, selection_seed
 from seat_assistant.reservation import SeatResult
 from seat_assistant.seat_inventory import seats_from_layout
 from seat_assistant.storage import Repository
-from seat_assistant.submission import active_reservations_for_day, confirmation_required, day_reservations, end_time_response_matches_start, find_matching_reservation, find_similar_reservation, history_page_records, normalize_time_option, requested_times_available, reservation_matches, submission_settled, time_option_id, time_values, validate_half_hour_time
+from seat_assistant.submission import active_reservations_for_day, confirmation_required, day_reservations, end_time_response_matches_start, find_matching_reservation, find_reservation_by_day_and_time, find_similar_reservation, history_page_records, local_reservation_blocks_retry, normalize_time_option, requested_times_available, reservation_matches, submission_settled, time_option_id, time_values, validate_half_hour_time
 
 SITE_URL = os.getenv("SEAT_LOGIN_URL", "https://seatlib.hpu.edu.cn/libseat/")
 CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 PROFILE = Path(".browser-profile").resolve()
 
 
-class LockedBrowser:
-    def __init__(self, profile: Path):
-        self.profile = profile
-        self.lock = AccountLock(profile.parent / "account.lock")
-        self.playwright = None
-        self.context = None
-
-    async def __aenter__(self):
-        self.lock.__enter__()
-        try:
-            self.playwright = await async_playwright().start()
-            self.context = await self.playwright.chromium.launch_persistent_context(
-                str(self.profile), executable_path=CHROME, headless=False,
-                viewport={"width": 1440, "height": 900}
-            )
-            return self.context
-        except Exception:
-            self.lock.__exit__(*sys.exc_info())
-            if self.playwright is not None:
-                await self.playwright.stop()
-            raise
-
-    async def __aexit__(self, exc_type, exc_value, traceback):
-        try:
-            if self.context is not None:
-                await self.context.close()
-            if self.playwright is not None:
-                await self.playwright.stop()
-        finally:
-            self.lock.__exit__(exc_type, exc_value, traceback)
-        return False
-
-
 async def main(args):
     _load_dotenv()
     account_settings = load_account_settings(args.account)
+    if not args.preferred:
+        args.preferred = list(account_settings.preferred_seats)
+    args.preference = getattr(account_settings, "seat_preference", {})
+    args.location = dict(getattr(account_settings, "location_preference", {}) or {})
+    if not args.location.get("library"):
+        raise ValueError("账号尚未配置图书馆位置偏好，请先运行初始化命令")
     profile = Path(account_settings.profile_path)
     repository = Repository(str(account_settings.db_path), account_settings.account_id)
     notifier = WeComNotifier(account_settings.wecom_webhook)
@@ -107,12 +81,41 @@ async def main(args):
                     input("登录完成后按回车：")
             print("正在确认进入座位预约首页……")
             await page.wait_for_url("**/libseat/**", timeout=30000)
-            print("程序操作：自动选择图书馆‘南校区第二图书馆’。")
-            await select_library(page, "南校区第二图书馆")
+            print(f"程序操作：自动选择图书馆‘{args.location['library']}’。")
+            await select_library(page, args.location["library"])
             print(f"程序操作：自动选择预约日期‘{args.date}’。")
             await select_date(page, args.date)
+            if not getattr(args, "room", ""):
+                room_names = await visible_room_names(page)
+                room_preference = {
+                    **args.location,
+                    "seat_preference": args.preference,
+                }
+                round_robin = None
+                if args.location.get("floor") and not args.location.get("room"):
+                    round_robin = lambda floor, candidates: repository.next_room_round_robin(
+                        args.location["library"], floor, candidates
+                    )
+                args.room = choose_room_for_preference(
+                    room_names,
+                    room_preference,
+                    seed=selection_seed(
+                        account_settings.account_id,
+                        args.date,
+                        getattr(args, "period", "manual"),
+                        args.start,
+                        args.end,
+                    ),
+                    round_robin=round_robin,
+                )
+                print(f"根据座位偏好选择阅览室：{args.room}")
             existing = await fetch_user_reservations(page, api_auth)
             print(f"当天预约记录：{daily_reservation_details(existing, args.date) or '无'}")
+            local_record = repository.get_reservation(args.date, "manual")
+            if local_reservation_blocks_retry(local_record):
+                print(f"本地记录显示本次日期已有{local_record['status']}提交，停止以避免重复预约：{local_record['start']}-{local_record['end']}")
+                await context.close()
+                return
             active_today = active_reservations_for_day(existing, args.date)
             if active_today:
                 details = "；".join(reservation_summary(item) for item in active_today)
@@ -151,7 +154,19 @@ async def main(args):
         selected = None
         request_headers = {}
         candidate_errors = []
-        for candidate in preview_seat_candidates(seats, args.preferred):
+        for candidate in preview_seat_candidates(
+            seats,
+            args.preferred,
+            args.preference,
+            seed=selection_seed(
+                account_settings.account_id,
+                args.date,
+                getattr(args, "period", "manual"),
+                args.start,
+                args.end,
+                args.room,
+            ),
+        ):
             print(f"尝试座位：{candidate.number}（座位ID {candidate.seat_id}，状态 FREE）")
             try:
                 async with page.expect_response(lambda r: "/rest/v2/startTimesForSeat/" in r.url, timeout=15000) as start_info:
@@ -211,6 +226,12 @@ async def main(args):
         # similar reservation after the homepage check.
         existing = await fetch_user_reservations(page, api_auth)
         print(f"提交前当天预约记录：{daily_reservation_details(existing, args.date) or '无'}")
+        local_record = repository.get_reservation(args.date, "manual")
+        if local_reservation_blocks_retry(local_record):
+            print(f"提交前发现本地已有{local_record['status']}提交，取消本次操作以避免重复预约：{local_record['start']}-{local_record['end']}")
+            await close_time_dialog(page)
+            await context.close()
+            return
         active_today = active_reservations_for_day(existing, args.date)
         if active_today:
             details = "；".join(reservation_summary(item) for item in active_today)
@@ -237,6 +258,10 @@ async def main(args):
             await page.wait_for_function("() => !document.body.innerText.includes('正在玩命预约中') && !document.body.innerText.includes('玩命预约')", timeout=30000)
         except Exception:
             print("提交请求超过 30 秒仍未结束，结果不明确；不会重复提交。")
+            repository.save_reservation(
+                args.date, "manual", "pending", args.start, args.end, args.room, selected.number,
+                "提交请求超过 30 秒仍未结束",
+            )
             send_preview_notification(
                 notifier,
                 args,
@@ -263,10 +288,12 @@ async def main(args):
         except Exception:
             pass
         verification_status, matched_reservation, verification_message = await wait_for_reservation_confirmation(
-            page, api_auth, args.date, args.room, selected.number, args.start, args.end, submission_signal=submission_signal
+            page, api_auth, args.date, args.room, selected.number, args.start, args.end,
+            existing, submission_signal=submission_signal,
         )
         if verification_status == "success":
             repository.record_successful_booking(date.today().isoformat(), f"{args.date}:{selected.number}:{uuid.uuid4().hex}")
+            repository.save_reservation(args.date, "manual", "reserved", args.start, args.end, args.room, selected.number, verification_message)
             print(f"核验成功：{args.date}，{args.room}，座位 {selected.number}，{args.start}-{args.end}")
             send_preview_notification(
                 notifier,
@@ -280,8 +307,17 @@ async def main(args):
                 args,
                 SeatResult(False, args.room, selected.number, verification_message),
             )
+        elif verification_status == "pending":
+            print(f"预约已提交，待核验：{verification_message}")
+            repository.save_reservation(args.date, "manual", "pending", args.start, args.end, args.room, selected.number, verification_message)
+            send_preview_notification(
+                notifier,
+                args,
+                SeatResult(False, args.room, selected.number, verification_message, conclusive=False),
+            )
         else:
             print(f"核验结果不明确：{verification_message or '请在‘我的预约’页面手动确认'}；程序不会重复提交。")
+            repository.save_reservation(args.date, "manual", "uncertain", args.start, args.end, args.room, selected.number, verification_message or "提交后核验结果不明确")
             send_preview_notification(
                 notifier,
                 args,
@@ -293,6 +329,39 @@ async def main(args):
         await context.close()
 
 
+async def run_scheduled_reservation(settings, day: str, period: str, start: str, end: str) -> SeatResult:
+    """Run the same browser flow used by the CLI without interactive prompts."""
+    args = argparse.Namespace(
+        account=settings.account_id,
+        room="",
+        room_id=None,
+        date=day,
+        start=start,
+        end=end,
+        preferred=[],
+        period=period,
+        submit=True,
+        confirm_submit=False,
+    )
+    repository = Repository(str(settings.db_path), settings.account_id)
+    try:
+        await main(args)
+    except Exception as exc:
+        return SeatResult(False, message=f"定时预约流程异常：{exc}", conclusive=False)
+    record = repository.get_reservation(day, "manual")
+    if not record:
+        return SeatResult(False, message="定时预约未产生可核验记录，已停止重复尝试", conclusive=False)
+    if record["status"] == "reserved":
+        return SeatResult(True, record["room"], record["seat"], record["message"])
+    return SeatResult(
+        False,
+        record["room"],
+        record["seat"],
+        record["message"] or "定时预约结果不明确",
+        conclusive=record["status"] == "failed",
+    )
+
+
 def send_preview_notification(notifier, args, result) -> bool:
     sent = send_reservation_notification(notifier, args.date, "手动", result, args.start, args.end)
     if sent:
@@ -300,6 +369,16 @@ def send_preview_notification(notifier, args, result) -> bool:
     else:
         print("企业微信通知未发送（未配置或发送失败）。")
     return sent
+
+
+async def visible_room_names(page) -> list[str]:
+    locator = page.locator(".room-name.item:visible, .room-wrap:visible")
+    values = []
+    for index in range(await locator.count()):
+        text = (await locator.nth(index).inner_text()).strip()
+        if text and text not in values:
+            values.append(text)
+    return values
 
 
 def reservation_verification_status(
@@ -311,11 +390,12 @@ def reservation_verification_status(
     start: str,
     end: str,
     submission_signal: tuple[str, str] = ("", ""),
+    pre_submit_reservations: list[dict] | None = None,
 ) -> tuple[str, dict | None, str]:
     all_today = day_reservations(reservations, day)
     active_today = active_reservations_for_day(all_today, day)
     all_details = daily_reservation_details(all_today, day)
-    matched = find_matching_reservation(reservations, day, room, seat, start, end)
+    matched = find_matching_reservation(reservations, day, room, seat, start, end, excluded=pre_submit_reservations)
     if matched:
         return "success", matched, f"网页历史记录已确认；当天全部预约：{all_details}"
     normalized = " ".join((page_text or "").replace("：", ":").split())
@@ -323,10 +403,15 @@ def reservation_verification_status(
         if marker in normalized:
             suffix = f"；当天全部预约：{all_details}" if all_details else ""
             return "failed", None, f"{marker}{suffix}"
+    if submission_signal[0] == "success":
+        time_match = find_reservation_by_day_and_time(reservations, day, start, end, excluded=pre_submit_reservations)
+        if time_match:
+            return "success", time_match, f"网页记录按日期和时间匹配（地点字段缺失）；当天全部预约：{all_details}"
+        if all_details:
+            return "pending", None, f"已提交，页面提示预约成功，但当天记录暂未形成唯一匹配；当天全部预约：{all_details}"
+        return "pending", None, "已提交，页面提示预约成功，但历史接口尚未同步记录；当天全部预约：无"
     if active_today:
         return "failed", None, f"当天已有其他有效预约，本次请求未生效；当天全部预约：{all_details}"
-    if submission_signal[0] == "success":
-        return "uncertain", None, f"页面提示预约成功，但历史接口尚未出现匹配记录；当天全部预约：{all_details or '无'}"
     return "uncertain", None, f"提交后未在我的预约历史中找到完全匹配记录；当天全部预约：{all_details or '无'}"
 
 
@@ -350,6 +435,11 @@ def submission_notice(page_text: str) -> tuple[str, str]:
     return "", ""
 
 
+def reservation_verification_delay(attempt: int) -> int:
+    """Return a conservative delay between post-submit API reads."""
+    return (2000, 3000, 5000)[min(max(0, attempt), 2)]
+
+
 async def wait_for_reservation_confirmation(
     page,
     auth_state: dict,
@@ -358,24 +448,47 @@ async def wait_for_reservation_confirmation(
     seat: str,
     start: str,
     end: str,
-    timeout_ms: int = 15000,
+    pre_submit_reservations: list[dict] | None = None,
+    timeout_ms: int = 45000,
     submission_signal: tuple[str, str] = ("", ""),
 ) -> tuple[str, dict | None, str]:
     deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
     last_error = ""
+    last_message = ""
+    last_status = "uncertain"
+    attempt = 0
     while asyncio.get_running_loop().time() < deadline:
         try:
-            reservations = await fetch_user_reservations(page, auth_state)
+            reservations = await fetch_post_submit_reservations(page, await wait_for_api_auth(page, auth_state))
             page_text = await page.locator("body").inner_text()
             status, matched, message = reservation_verification_status(
-                reservations, page_text, day, room, seat, start, end, submission_signal
+                reservations, page_text, day, room, seat, start, end,
+                submission_signal=submission_signal,
+                pre_submit_reservations=pre_submit_reservations,
             )
-            if status != "uncertain":
+            last_status = status
+            last_message = message
+            if status in {"success", "failed"}:
                 return status, matched, message
         except Exception as exc:
             last_error = str(exc)
-        await page.wait_for_timeout(500)
-    return "uncertain", None, last_error or "提交后未在我的预约历史中找到完全匹配记录"
+        await page.wait_for_timeout(reservation_verification_delay(attempt))
+        attempt += 1
+    if last_status == "pending":
+        try:
+            reservations = await fetch_user_reservations(page, auth_state)
+            page_text = await page.locator("body").inner_text()
+            last_status, matched, last_message = reservation_verification_status(
+                reservations, page_text, day, room, seat, start, end,
+                submission_signal=submission_signal,
+                pre_submit_reservations=pre_submit_reservations,
+            )
+            if last_status == "success":
+                return last_status, matched, last_message
+        except Exception as exc:
+            last_error = str(exc)
+        return "pending", None, last_message or last_error
+    return "uncertain", None, last_error or last_message or "提交后未在我的预约历史中找到完全匹配记录"
 
 
 async def login_if_configured(page, settings=None):
@@ -559,6 +672,11 @@ async def fetch_current_reservations(page, auth: dict) -> list[dict]:
     body = await fetch_reservation_payload(page, endpoint, auth["headers"], "读取当前预约")
     records, _ = history_page_records(body)
     return records
+
+
+async def fetch_post_submit_reservations(page, auth: dict) -> list[dict]:
+    """Use the lightweight current-reservation endpoint during polling."""
+    return await fetch_current_reservations(page, auth)
 
 
 async def fetch_reservation_payload(page, endpoint: str, headers: dict, label: str) -> dict:

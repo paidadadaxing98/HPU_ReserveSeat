@@ -16,12 +16,18 @@ _ACTIVE_RESERVATION_STATUSES = frozenset({
     "预约中",
     "生效",
 })
+_LOCAL_RETRY_BLOCKING_STATUSES = frozenset({"reserved", "pending", "uncertain"})
 
 
 def confirmation_required(submit_flag: bool, confirm_flag: bool, phrase: str) -> bool:
     if not submit_flag:
         return True
     return confirm_flag and phrase.strip() != "SUBMIT"
+
+
+def local_reservation_blocks_retry(record: dict | None) -> bool:
+    """Keep a later process from repeating an inconclusive real submission."""
+    return bool(record and str(record.get("status", "")).strip().lower() in _LOCAL_RETRY_BLOCKING_STATUSES)
 
 
 def reservation_matches(text: str, day: str, room: str, seat: str, start: str, end: str) -> bool:
@@ -36,6 +42,7 @@ def find_matching_reservation(
     seat: str,
     start: str,
     end: str,
+    excluded: list[dict] | None = None,
 ) -> dict | None:
     """Find an active history record that confirms one submitted booking."""
     requested_start = _clock_minutes(start)
@@ -44,8 +51,11 @@ def find_matching_reservation(
         return None
     requested_room = _normalize_room(room)
     requested_seat = _normalize_seat(seat)
+    excluded_keys = {_record_identity(item) for item in (excluded or []) if isinstance(item, dict)}
     for item in reservations or []:
         if not isinstance(item, dict) or _extract_date(item) != day or not _is_active_reservation(item):
+            continue
+        if _record_identity(item) in excluded_keys:
             continue
         existing_room = _extract_room(item)
         if existing_room and requested_room and not _room_matches(existing_room, requested_room):
@@ -57,6 +67,52 @@ def find_matching_reservation(
         if existing_start == requested_start and existing_end == requested_end:
             return item
     return None
+
+
+def find_reservation_by_day_and_time(
+    reservations: list[dict],
+    day: str,
+    start: str,
+    end: str,
+    excluded: list[dict] | None = None,
+) -> dict | None:
+    """Find one active record with exact times but incomplete location fields.
+
+    This is deliberately narrower than the normal verifier.  It is only safe
+    as a post-submit fallback when the site omitted room or seat data, and
+    exactly one active record has the submitted date and time.
+    """
+    requested_start = _clock_minutes(start)
+    requested_end = _clock_minutes(end)
+    if requested_start is None or requested_end is None or requested_end <= requested_start:
+        return None
+    excluded_keys = {_record_identity(item) for item in (excluded or []) if isinstance(item, dict)}
+    matches = []
+    for item in reservations or []:
+        if not isinstance(item, dict) or _extract_date(item) != day or not _is_active_reservation(item):
+            continue
+        if _record_identity(item) in excluded_keys:
+            continue
+        existing_start = _extract_time(item, ("startTime", "start_time", "start", "beginTime", "begin"))
+        existing_end = _extract_time(item, ("endTime", "end_time", "end", "finishTime", "finish"))
+        if existing_start != requested_start or existing_end != requested_end:
+            continue
+        matches.append(item)
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    return match if not (_extract_room(match) and _extract_seat(match)) else None
+
+
+def _record_identity(item: dict) -> str:
+    for key in ("id", "reservationId", "reserveId", "recordId"):
+        value = item.get(key)
+        if value not in (None, ""):
+            return f"{key}:{value}"
+    return "|".join(
+        _value_text(item.get(key))
+        for key in ("date", "begin", "end", "loc", "location", "seatNumber", "seatNo")
+    )
 
 
 def active_reservations_for_day(reservations: list[dict], day: str) -> list[dict]:

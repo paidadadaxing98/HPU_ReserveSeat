@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 from seat_assistant.reservation import SeatResult
-from scripts.preview_reservation import close_success_dialog, daily_reservation_details, fetch_user_reservations, reservation_summary, reservation_verification_status, send_preview_notification, submission_notice
+from scripts.preview_reservation import close_success_dialog, daily_reservation_details, fetch_post_submit_reservations, fetch_user_reservations, reservation_summary, reservation_verification_delay, reservation_verification_status, send_preview_notification, submission_notice
 
 
 def test_preview_notification_uses_manual_booking_context():
@@ -177,6 +177,22 @@ def test_fetch_user_reservations_falls_back_to_current_endpoint():
     ]
 
 
+def test_post_submit_poll_reads_only_current_reservations_endpoint():
+    record = {"date": "2026-08-20", "begin": "09:00", "end": "12:00", "stat": "RESERVE"}
+
+    class Page:
+        def __init__(self):
+            self.endpoints = []
+
+        async def evaluate(self, script, payload):
+            self.endpoints.append(payload["endpoint"])
+            return {"status": 200, "body": {"code": 0, "data": [record]}}
+
+    page = Page()
+    assert asyncio.run(fetch_post_submit_reservations(page, {"headers": {"authorization": "x"}, "token": "token"})) == [record]
+    assert page.endpoints == ["/rest/v2/user/reservations?token=token"]
+
+
 def test_fetch_user_reservations_falls_back_when_history_endpoint_fails():
     record = {"date": "2026-08-20", "begin": "20:00", "end": "21:00", "stat": "RESERVE"}
 
@@ -296,9 +312,84 @@ def test_reservation_verification_keeps_success_popup_as_evidence_when_history_i
         submission_signal=("success", "预约成功"),
     )
 
-    assert status == "uncertain"
+    assert status == "pending"
     assert record is None
     assert "页面提示预约成功" in message
+
+
+def test_reservation_verification_uses_unique_time_match_when_location_fields_missing():
+    status, record, message = reservation_verification_status(
+        [{"date": "2026-08-20", "begin": "09:00", "end": "12:00", "stat": "RESERVE"}],
+        "预约成功",
+        "2026-08-20",
+        "4层计算机类借阅区",
+        "169",
+        "09:00",
+        "12:00",
+        submission_signal=("success", "预约成功"),
+    )
+
+    assert status == "success"
+    assert record["begin"] == "09:00"
+    assert "时间匹配" in message
+
+
+def test_reservation_verification_reports_submitted_pending_when_success_has_no_record():
+    status, record, message = reservation_verification_status(
+        [],
+        "预约成功",
+        "2026-08-20",
+        "4层计算机类借阅区",
+        "169",
+        "09:00",
+        "12:00",
+        submission_signal=("success", "预约成功"),
+    )
+
+    assert status == "pending"
+    assert record is None
+    assert "已提交" in message
+
+
+def test_success_page_keeps_pending_state_when_only_an_old_active_record_exists():
+    status, record, message = reservation_verification_status(
+        [{"date": "2026-08-20", "begin": "20:00", "end": "21:00", "stat": "RESERVE"}],
+        "预约成功",
+        "2026-08-20",
+        "4层计算机类借阅区",
+        "169",
+        "09:00",
+        "12:00",
+        submission_signal=("success", "预约成功"),
+    )
+
+    assert status == "pending"
+    assert record is None
+    assert "已提交" in message
+    assert "20:00-21:00" in message
+
+
+def test_success_page_does_not_reuse_a_pre_submit_incomplete_record():
+    record = {"id": "old", "date": "2026-08-20", "begin": "09:00", "end": "12:00", "stat": "RESERVE"}
+    status, matched, message = reservation_verification_status(
+        [record],
+        "预约成功",
+        "2026-08-20",
+        "4层计算机类借阅区",
+        "169",
+        "09:00",
+        "12:00",
+        submission_signal=("success", "预约成功"),
+        pre_submit_reservations=[record],
+    )
+
+    assert status == "pending"
+    assert matched is None
+    assert "已提交" in message
+
+
+def test_reservation_verification_delay_uses_conservative_backoff():
+    assert [reservation_verification_delay(index) for index in range(5)] == [2000, 3000, 5000, 5000, 5000]
 
 
 def test_daily_reservation_details_reports_all_records_and_statuses():

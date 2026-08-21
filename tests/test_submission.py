@@ -1,4 +1,4 @@
-from seat_assistant.submission import active_reservations_for_day, confirmation_required, day_reservations, end_time_response_matches_start, end_times_request_url, end_times_response_matches, find_matching_reservation, find_similar_reservation, history_page_records, normalize_time_option, reservation_matches, requested_times_available, submission_settled, time_option_id, time_options, time_to_minutes, time_values
+from seat_assistant.submission import active_reservations_for_day, confirmation_required, day_reservations, end_time_response_matches_start, end_times_request_url, end_times_response_matches, find_matching_reservation, find_reservation_by_day_and_time, find_similar_reservation, history_page_records, local_reservation_blocks_retry, normalize_time_option, reservation_matches, requested_times_available, submission_settled, time_option_id, time_options, time_to_minutes, time_values
 
 
 def test_submission_only_prompts_for_explicit_debug_confirmation():
@@ -221,6 +221,76 @@ def test_find_matching_reservation_verifies_history_record_and_seat():
         "15:00",
         "17:00",
     ) is None
+
+
+def test_find_matching_reservation_excludes_pre_submit_snapshot_record():
+    reservation = {
+        "id": "old",
+        "date": "2026-08-20",
+        "loc": "4层计算机类借阅区，座位号169",
+        "begin": "09:00",
+        "end": "12:00",
+        "stat": "RESERVE",
+    }
+
+    assert find_matching_reservation(
+        [reservation], "2026-08-20", "4层计算机类借阅区", "169", "09:00", "12:00", excluded=[reservation]
+    ) is None
+
+
+def test_find_reservation_by_day_and_time_allows_missing_location_when_unique():
+    reservation = {
+        "date": "2026-08-20",
+        "begin": "09:00",
+        "end": "12:00",
+        "stat": "RESERVE",
+    }
+
+    assert find_reservation_by_day_and_time(
+        [reservation], "2026-08-20", "09:00", "12:00"
+    ) == reservation
+
+
+def test_find_reservation_by_day_and_time_rejects_ambiguous_active_records():
+    records = [
+        {"date": "2026-08-20", "begin": "09:00", "end": "12:00", "stat": "RESERVE"},
+        {"date": "2026-08-20", "begin": "09:00", "end": "12:00", "stat": "RESERVE"},
+    ]
+
+    assert find_reservation_by_day_and_time(records, "2026-08-20", "09:00", "12:00") is None
+
+
+def test_find_reservation_by_day_and_time_rejects_full_record_when_location_does_not_match():
+    records = [
+        {"date": "2026-08-20", "begin": "09:00", "end": "12:00", "stat": "RESERVE"},
+        {
+            "date": "2026-08-20",
+            "begin": "09:00",
+            "end": "12:00",
+            "loc": "其他阅览室，座位号001",
+            "stat": "RESERVE",
+        },
+    ]
+
+    assert find_reservation_by_day_and_time(records, "2026-08-20", "09:00", "12:00") is None
+
+
+def test_find_reservation_by_day_and_time_excludes_submission_snapshot_records():
+    old = {"id": "old", "date": "2026-08-20", "begin": "09:00", "end": "12:00", "stat": "RESERVE"}
+    new = {"id": "new", "date": "2026-08-20", "begin": "09:00", "end": "12:00", "stat": "RESERVE"}
+
+    assert find_reservation_by_day_and_time(
+        [old, new], "2026-08-20", "09:00", "12:00", excluded=[old]
+    ) == new
+
+
+def test_local_reservation_blocks_retry_only_for_nonterminal_submission_states():
+    assert local_reservation_blocks_retry({"status": "reserved"})
+    assert local_reservation_blocks_retry({"status": "pending"})
+    assert local_reservation_blocks_retry({"status": "uncertain"})
+    assert not local_reservation_blocks_retry({"status": "failed"})
+    assert not local_reservation_blocks_retry({"status": "cancelled"})
+    assert not local_reservation_blocks_retry(None)
 
 
 def test_active_reservations_for_day_does_not_require_time_overlap():

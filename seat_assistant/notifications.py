@@ -10,6 +10,8 @@ def render_reservation(day: str, period: str, result, start: str, end: str) -> s
     label = _PERIOD_LABELS.get(period, period)
     if result.success:
         status = "预约成功"
+    elif not result.conclusive and str(result.message or "").lstrip().startswith("已提交"):
+        status = "预约已提交，待核验"
     elif result.conclusive:
         status = "预约失败"
     else:
@@ -33,6 +35,52 @@ def send_reservation_notification(notifier, day: str, period: str, result, start
         return bool(notifier.send(render_reservation(day, period, result, start, end)))
     except Exception as exc:
         logging.getLogger(__name__).warning("预约通知发送失败：%s", exc)
+        return False
+
+
+def render_scheduler_summary(account_id: str, day: str, summary: dict) -> str:
+    status = str(summary.get("status") or "completed")
+    label = {"reserved": "已完成", "skipped": "已跳过", "uncertain": "结果不明确", "completed": "已运行"}.get(status, status)
+    lines = [f"账号 {account_id} 定时任务{label}", f"日期：{day}"]
+    if summary.get("message"):
+        lines.append(f"说明：{summary['message']}")
+    for period, result in summary.items():
+        if period in {"status", "message", "account_id"} or not isinstance(result, dict):
+            continue
+        period_label = _PERIOD_LABELS.get(period, period)
+        item_status = result.get("status", "unknown")
+        item_message = result.get("message", "")
+        lines.append(f"{period_label}：{item_status}{f'，{item_message}' if item_message else ''}")
+    return "\n".join(lines)
+
+
+def render_initialization(account_id: str, state: dict) -> str:
+    status = "初始化完成" if state.get("status") == "ready" else "初始化失败"
+    lines = [f"账号 {account_id}{status}"]
+    if state.get("last_verified_at"):
+        lines.append(f"验证时间：{state['last_verified_at']}")
+    if state.get("message"):
+        lines.append(f"说明：{state['message']}")
+    return "\n".join(lines)
+
+
+def send_initialization_notification(notifier, account_id: str, state: dict) -> bool:
+    if notifier is None:
+        return False
+    try:
+        return bool(notifier.send(render_initialization(account_id, state)))
+    except Exception as exc:
+        logging.getLogger(__name__).warning("初始化通知发送失败：%s", exc)
+        return False
+
+
+def send_scheduler_notification(notifier, account_id: str, day: str, summary: dict) -> bool:
+    if notifier is None:
+        return False
+    try:
+        return bool(notifier.send(render_scheduler_summary(account_id, day, summary)))
+    except Exception as exc:
+        logging.getLogger(__name__).warning("定时任务通知发送失败：%s", exc)
         return False
 
 

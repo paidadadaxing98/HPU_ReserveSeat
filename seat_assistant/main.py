@@ -8,7 +8,7 @@ from .storage import Repository
 def build_service(account_id=None):
     """Build one isolated service, optionally selecting an account by id."""
     settings = load_account_settings(account_id)
-    adapter = DryRunReservation() if settings.dry_run else PlaywrightReservation()
+    adapter = DryRunReservation() if settings.dry_run else PlaywrightReservation(settings)
     notifier = WeComNotifier(settings.wecom_webhook)
     return settings, AssistantService(settings, Repository(settings.db_path, settings.account_id), adapter, notifier)
 
@@ -19,7 +19,7 @@ def build_services():
     services = []
     for account in load_accounts():
         settings = load_account_settings(account.id)
-        adapter = DryRunReservation() if settings.dry_run else PlaywrightReservation()
+        adapter = DryRunReservation() if settings.dry_run else PlaywrightReservation(settings)
         notifier = WeComNotifier(settings.wecom_webhook)
         services.append(AssistantService(settings, Repository(settings.db_path, settings.account_id), adapter, notifier))
     return base, services

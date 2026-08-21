@@ -26,6 +26,14 @@ class Period:
     default_arrival: str
 
 
+def _default_periods() -> dict[str, Period]:
+    return {
+        "morning": Period(("08:00", "12:00"), ("12:00", "12:00"), "08:30"),
+        "afternoon": Period(("14:30", "18:30"), ("18:30", "18:30"), "15:00"),
+        "evening": Period(("19:30", "22:00"), ("22:00", "22:00"), "20:00"),
+    }
+
+
 @dataclass
 class Settings:
     account_id: str = "default"
@@ -47,11 +55,11 @@ class Settings:
     captcha_llm_timeout_seconds: float = 15.0
     captcha_llm_max_attempts: int = 2
     profile_path: str = ".browser-profile"
-    periods: dict[str, Period] = field(default_factory=lambda: {
-        "morning": Period(("08:30", "09:30"), ("11:30", "13:00"), "08:55"),
-        "afternoon": Period(("14:00", "15:00"), ("17:30", "19:30"), "14:20"),
-        "evening": Period(("20:00", "20:30"), ("22:00", "22:00"), "20:10"),
-    })
+    periods: dict[str, Period] = field(default_factory=_default_periods)
+    preferred_seats: tuple[str, ...] = ()
+    seat_preference: dict = field(default_factory=dict)
+    location_preference: dict = field(default_factory=dict)
+    require_initialization: bool = False
 
     def __post_init__(self):
         if not self.control_token.strip():
@@ -83,6 +91,124 @@ class AccountSettings:
     db_path: Path
     wecom_webhook: str = ""
     login_url: str = "https://seatlib.hpu.edu.cn/libseat/"
+    periods: dict[str, Period] = field(default_factory=_default_periods)
+    preferred_seats: tuple[str, ...] = ()
+    seat_preference: dict = field(default_factory=dict)
+    location_preference: dict = field(default_factory=dict)
+
+
+def _copy_periods(periods: dict[str, Period]) -> dict[str, Period]:
+    return {
+        name: Period(tuple(period.arrival_window), tuple(period.departure_window), period.default_arrival)
+        for name, period in periods.items()
+    }
+
+
+def _normalize_seat_preference(raw, legacy: tuple[str, ...] = (), account_id: str = "<空>") -> dict:
+    if raw is None:
+        return {"mode": "seats", "seats": list(legacy)} if legacy else {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"账号 {account_id} 的 seat_preference 必须是对象")
+    mode = str(raw.get("mode", "")).strip().lower()
+    if mode not in {"random", "floor", "seats"}:
+        raise ValueError(f"账号 {account_id} 的 seat_preference.mode 必须是 random、floor 或 seats")
+    if mode == "random":
+        return {"mode": "random"}
+    if mode == "floor":
+        floor = str(raw.get("floor", "")).strip()
+        if not floor:
+            raise ValueError(f"账号 {account_id} 的楼层偏好不能为空")
+        return {"mode": "floor", "floor": floor}
+    values = raw.get("seats", legacy)
+    if not isinstance(values, (list, tuple)):
+        raise ValueError(f"账号 {account_id} 的座位偏好必须是列表")
+    seats = [str(value).strip() for value in values if str(value).strip()]
+    if not seats:
+        raise ValueError(f"账号 {account_id} 的具体座位列表不能为空")
+    return {"mode": "seats", "seats": seats}
+
+
+def _normalize_location_preference(raw, account_id: str = "<空>") -> dict:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"账号 {account_id} 的位置偏好必须是对象")
+    library = str(raw.get("library", "")).strip()
+    if not library:
+        raise ValueError(f"账号 {account_id} 的位置偏好必须选择图书馆")
+    floor = str(raw.get("floor", "")).strip()
+    room = str(raw.get("room", "")).strip()
+    return {"library": library, "floor": floor, "room": room}
+
+
+def _parse_initialization(entry: dict, inherited: dict | None = None) -> tuple[dict[str, Period], tuple[str, ...], dict, dict]:
+    source = inherited or {
+        "periods": _default_periods(),
+        "preferred_seats": (),
+        "seat_preference": {},
+        "location_preference": {},
+    }
+    periods = _copy_periods(source["periods"])
+    preferred = tuple(str(value).strip() for value in source["preferred_seats"] if str(value).strip())
+    seat_preference = dict(source.get("seat_preference") or {})
+    location_preference = dict(source.get("location_preference") or {})
+    initialization = entry.get("initialization") or {}
+    if not isinstance(initialization, dict):
+        raise ValueError(f"账号 {entry.get('id', '<空>')} 的 initialization 必须是对象")
+    raw_seats = initialization.get("preferred_seats")
+    if raw_seats is not None:
+        if not isinstance(raw_seats, list):
+            raise ValueError(f"账号 {entry.get('id', '<空>')} 的 preferred_seats 必须是列表")
+        preferred = tuple(str(value).strip() for value in raw_seats if str(value).strip())
+        seat_preference = {"mode": "seats", "seats": list(preferred)} if preferred else {}
+    if "seat_preference" in initialization:
+        seat_preference = _normalize_seat_preference(initialization.get("seat_preference"), preferred, str(entry.get("id", "<空>")))
+        if seat_preference.get("mode") == "seats":
+            preferred = tuple(seat_preference["seats"])
+    location_value = initialization.get("location_preference")
+    if location_value is None and any(key in initialization for key in ("library", "floor", "room")):
+        location_value = {
+            "library": initialization.get("library", ""),
+            "floor": initialization.get("floor", ""),
+            "room": initialization.get("room", ""),
+        }
+    if location_value is not None:
+        location_preference = _normalize_location_preference(location_value, str(entry.get("id", "<空>")))
+    raw_periods = initialization.get("periods") or {}
+    if not isinstance(raw_periods, dict):
+        raise ValueError(f"账号 {entry.get('id', '<空>')} 的 periods 必须是对象")
+    for name, value in raw_periods.items():
+        if name not in periods or not isinstance(value, dict):
+            raise ValueError(f"账号 {entry.get('id', '<空>')} 的时段配置无效：{name}")
+        current = periods[name]
+        arrival = tuple(str(item).strip() for item in value.get("arrival_window", current.arrival_window))
+        departure = tuple(str(item).strip() for item in value.get("departure_window", current.departure_window))
+        default = str(value.get("default_arrival", current.default_arrival)).strip()
+        if len(arrival) != 2 or len(departure) != 2 or not default:
+            raise ValueError(f"账号 {entry.get('id', '<空>')} 的时段配置无效：{name}")
+        periods[name] = Period(arrival, departure, default)
+    return periods, preferred, seat_preference, location_preference
+
+
+def _resolve_initialization(entry: dict, by_id: dict[str, dict], trail: tuple[str, ...] = ()) -> tuple[dict[str, Period], tuple[str, ...], dict]:
+    account_id = str(entry.get("id", ""))
+    if account_id in trail:
+        raise ValueError(f"账号初始化继承出现循环：{' -> '.join((*trail, account_id))}")
+    initialization = entry.get("initialization") or {}
+    parent_id = initialization.get("inherits_from") if isinstance(initialization, dict) else None
+    inherited = None
+    if parent_id:
+        parent = by_id.get(str(parent_id))
+        if parent is None:
+            raise ValueError(f"账号 {account_id} 继承的模板账号不存在：{parent_id}")
+        parent_periods, parent_seats, parent_preference, parent_location = _resolve_initialization(parent, by_id, (*trail, account_id))
+        inherited = {
+            "periods": parent_periods,
+            "preferred_seats": parent_seats,
+            "seat_preference": parent_preference,
+            "location_preference": parent_location,
+        }
+    return _parse_initialization(entry, inherited)
 
 
 def load_accounts(path: str | None = None) -> list[AccountSettings]:
@@ -110,6 +236,7 @@ def load_accounts(path: str | None = None) -> list[AccountSettings]:
     if len(entries) > MAX_ACCOUNTS:
         raise ValueError(f"最多支持 {MAX_ACCOUNTS} 个账号")
     root = config_path.parent
+    entries_by_id = {str(item.get("id", "")).strip(): item for item in entries if isinstance(item, dict)}
     accounts = []
     ids = set()
     credentials = set()
@@ -157,6 +284,7 @@ def load_accounts(path: str | None = None) -> list[AccountSettings]:
             raise ValueError(f"数据库路径重复：{database}")
         profile_paths.add(profile)
         database_paths.add(database)
+        periods, preferred_seats, seat_preference, location_preference = _resolve_initialization(entry, entries_by_id)
         accounts.append(AccountSettings(
             id=account_id,
             account=account,
@@ -165,6 +293,10 @@ def load_accounts(path: str | None = None) -> list[AccountSettings]:
             db_path=database,
             wecom_webhook=str(entry.get("wecom_webhook", "")).strip(),
             login_url=str(entry.get("login_url") or os.getenv("SEAT_LOGIN_URL", "https://seatlib.hpu.edu.cn/libseat/")).strip(),
+            periods=periods,
+            preferred_seats=preferred_seats,
+            seat_preference=seat_preference,
+            location_preference=location_preference,
         ))
     return accounts
 
@@ -223,4 +355,9 @@ def load_account_settings(account_id: str | None = None) -> Settings:
         captcha_llm_timeout_seconds=base.captcha_llm_timeout_seconds,
         captcha_llm_max_attempts=base.captcha_llm_max_attempts,
         profile_path=str(selected.profile_path),
+        periods=_copy_periods(selected.periods),
+        preferred_seats=selected.preferred_seats,
+        seat_preference=dict(selected.seat_preference),
+        location_preference=dict(selected.location_preference),
+        require_initialization=True,
     )

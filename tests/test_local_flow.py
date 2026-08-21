@@ -13,7 +13,7 @@ def test_local_flow_persists_booking_delay_and_cancellation(tmp_path):
 
     booking = run_once(service, "2026-08-21")
     assert booking["morning"]["status"] == "reserved"
-    assert repo.get_reservation("2026-08-21", "morning")["start"] == "09:00"
+    assert repo.get_reservation("2026-08-21", "morning")["start"] == "08:30"
 
     duplicate = service.reserve_period("2026-08-21", "morning")
     assert duplicate.message == "已存在预约"

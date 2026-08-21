@@ -1,4 +1,5 @@
 from seat_assistant.commands import parse_command
+from pathlib import Path
 
 
 def test_parse_direct_delay():
@@ -25,3 +26,11 @@ def test_parse_invalid_clock_as_help_instead_of_creating_an_action():
 def test_parse_arrival_record_command():
     command = parse_command("记录上午到馆 09:05")
     assert (command.kind, command.period, command.at) == ("record_arrival", "morning", "09:05")
+
+
+def test_readme_has_quick_start_and_account_id_commands():
+    text = Path("README.md").read_text(encoding="utf-8")
+
+    assert "## 快速开始" in text
+    assert "--account account02" in text
+    assert "scripts/initialize_account.py" in text

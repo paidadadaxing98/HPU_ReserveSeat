@@ -92,6 +92,76 @@ def test_load_accounts_reads_json_and_derives_isolated_paths(monkeypatch, tmp_pa
     )]
 
 
+def test_load_accounts_resolves_initialization_preferences_and_inheritance(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    payload = {
+        "accounts": [
+            {
+                "id": "account01",
+                "account": "1001",
+                "password": "secret-a",
+                "initialization": {
+                    "preferred_seats": ["169", "168", "170"],
+                    "periods": {
+                        "morning": {
+                            "arrival_window": ["08:20", "09:20"],
+                            "departure_window": ["11:30", "13:00"],
+                            "default_arrival": "08:50",
+                        }
+                    },
+                },
+            },
+            {
+                "id": "account02",
+                "account": "1002",
+                "password": "secret-b",
+                "initialization": {"inherits_from": "account01"},
+            },
+        ]
+    }
+    (tmp_path / "accounts.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    accounts = load_accounts()
+
+    assert accounts[0].preferred_seats == ("169", "168", "170")
+    assert accounts[1].preferred_seats == accounts[0].preferred_seats
+    assert accounts[1].periods["morning"].arrival_window == ("08:20", "09:20")
+    assert accounts[1].periods["morning"].default_arrival == "08:50"
+
+
+def test_load_account_settings_carries_initialization_preferences(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "accounts.json").write_text(json.dumps({"accounts": [{
+        "id": "alice", "account": "1001", "password": "secret",
+        "initialization": {"preferred_seats": ["169", "168"]},
+    }]}), encoding="utf-8")
+
+    settings = load_account_settings("alice")
+
+    assert settings.preferred_seats == ("169", "168")
+
+
+def test_load_account_settings_reads_structured_location_preference(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "accounts.json").write_text(json.dumps({"accounts": [{
+        "id": "alice", "account": "1001", "password": "secret",
+        "initialization": {
+            "library": "南校区第二图书馆",
+            "floor": "4F",
+            "room": "4层计算机类借阅区",
+            "seat_preference": {"mode": "random"},
+        },
+    }]}), encoding="utf-8")
+
+    settings = load_account_settings("alice")
+
+    assert settings.location_preference == {
+        "library": "南校区第二图书馆",
+        "floor": "4F",
+        "room": "4层计算机类借阅区",
+    }
+
+
 def test_load_accounts_rejects_more_than_twenty_accounts(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     payload = {"accounts": [{"id": f"id-{i}", "account": str(i), "password": "secret"} for i in range(MAX_ACCOUNTS + 1)]}

@@ -229,3 +229,16 @@ def test_reusing_existing_booking_is_allowed_when_success_quota_is_full(tmp_path
     assert reused.success is True
     assert reused.message == "已存在预约"
     assert len(adapter.reserve_calls) == 1
+
+
+def test_uninitialized_delay_does_not_cancel_existing_reservation(tmp_path):
+    adapter = FakeAdapter()
+    settings = Settings(account_id="alice", control_token="local-token", require_initialization=True)
+    repo = Repository(str(tmp_path / "assistant.sqlite"), account_id="alice")
+    service = AssistantService(settings, repo, adapter)
+    repo.save_reservation("2026-08-21", "morning", "reserved", "08:30", "12:00", "阅览室", "169", "old")
+
+    result = service.apply_command(Command("delay", "morning", "09:20"), "2026-08-21")
+
+    assert result["ok"] is False
+    assert adapter.cancel_calls == []

@@ -5,7 +5,35 @@
       "enabled": true,
       "account": "你的统一认证账号",
       "password": "你的统一认证密码",
-      "wecom_webhook": ""
+      "wecom_webhook": "",
+      "initialization": {
+        "location_preference": {
+          "library": "南校区第二图书馆",
+          "floor": "",
+          "room": ""
+        },
+        "seat_preference": {
+          "mode": "random"
+        },
+        "preferred_seats": ["169", "168", "170"],
+        "periods": {
+          "morning": {
+            "arrival_window": ["08:00", "12:00"],
+            "departure_window": ["12:00", "12:00"],
+            "default_arrival": "08:30"
+          },
+          "afternoon": {
+            "arrival_window": ["14:30", "18:30"],
+            "departure_window": ["18:30", "18:30"],
+            "default_arrival": "15:00"
+          },
+          "evening": {
+            "arrival_window": ["19:30", "22:00"],
+            "departure_window": ["22:00", "22:00"],
+            "default_arrival": "20:00"
+          }
+        }
+      }
     }
   ]
 }

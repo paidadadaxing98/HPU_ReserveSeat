@@ -7,6 +7,7 @@ from seat_assistant.service import AssistantService
 from seat_assistant.storage import Repository
 from seat_assistant.scheduler import next_booking_time, run_accounts_once
 from seat_assistant.config import AccountSettings
+from seat_assistant.notifications import render_scheduler_summary
 
 
 class SchedulerAdapter:
@@ -87,3 +88,24 @@ def test_run_accounts_once_runs_accounts_in_order_and_keeps_results_separate(tmp
         "alice": {"status": "reserved", "account_id": "alice"},
         "bob": {"status": "reserved", "account_id": "bob"},
     }
+
+
+def test_run_once_skips_uninitialized_configured_account_without_reservation_call(tmp_path):
+    adapter = SchedulerAdapter()
+    settings = Settings(account_id="alice", control_token="local-token", require_initialization=True)
+    service = AssistantService(settings, Repository(str(tmp_path / "db.sqlite"), "alice"), adapter)
+
+    result = run_once(service, "2026-08-22")
+
+    assert result["status"] == "skipped"
+    assert "请先初始化账号" in result["message"]
+    assert adapter.reserve_calls == []
+
+
+def test_scheduler_notification_summary_contains_account_id_and_reason():
+    text = render_scheduler_summary(
+        "alice", "2026-08-22", {"status": "skipped", "message": "请先初始化账号"}
+    )
+
+    assert "alice" in text
+    assert "请先初始化账号" in text

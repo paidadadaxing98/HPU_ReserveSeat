@@ -5,6 +5,7 @@ from .commands import Command
 from .config import Settings
 from .domain import build_reservation, parse_hhmm, reservation_start_for_arrival
 from .notifications import send_reservation_notification
+from .initialization import initialization_skip_message
 from .reservation import SeatResult
 from .storage import Repository
 
@@ -19,6 +20,10 @@ class AssistantService:
         return run_once(self, day)
 
     def reserve_period(self, day: str, period_name: str, arrival_override: str | None = None, quota_day: str | None = None):
+        if getattr(self.settings, "require_initialization", False):
+            state = self.repo.initialization_state()
+            if state["status"] != "ready":
+                return SeatResult(False, message=initialization_skip_message(state))
         if period_name not in self.settings.periods:
             return SeatResult(False, message=f"未知学习时段：{period_name}")
         quota_day = quota_day or date.today().isoformat()
@@ -58,6 +63,8 @@ class AssistantService:
 
     def apply_command(self, command: Command, day: str | None = None):
         day = day or date.today().isoformat()
+        if getattr(self.settings, "require_initialization", False) and self.repo.initialization_state()["status"] != "ready":
+            return {"ok": False, "message": initialization_skip_message(self.repo.initialization_state())}
         if command.kind == "delay":
             if command.period not in self.settings.periods:
                 return {"ok": False, "message": "未识别学习时段。请使用上午、下午或晚上。"}

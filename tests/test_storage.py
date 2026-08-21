@@ -76,3 +76,12 @@ def test_repository_success_count_does_not_include_failed_or_uncertain_records(t
     repo.save_reservation("2026-08-21", "afternoon", "uncertain", "15:00", "17:00")
 
     assert repo.successful_booking_count("2026-08-21") == 0
+
+
+def test_repository_round_robins_rooms_per_account_library_and_floor(tmp_path):
+    repo = Repository(str(tmp_path / "assistant.sqlite"), account_id="alice")
+    rooms = ["3层自主学习空间（Ⅱ）", "4层计算机类借阅区"]
+
+    assert repo.next_room_round_robin("南校区第二图书馆", "4F", rooms) == rooms[0]
+    assert repo.next_room_round_robin("南校区第二图书馆", "4F", rooms) == rooms[1]
+    assert repo.next_room_round_robin("南校区第二图书馆", "4F", rooms) == rooms[0]

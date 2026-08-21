@@ -15,6 +15,19 @@ class Repository:
         self.db.execute("CREATE TABLE IF NOT EXISTS commands (request_id TEXT PRIMARY KEY, text TEXT NOT NULL, response TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
         self.db.execute("CREATE TABLE IF NOT EXISTS scheduler_runs (date TEXT PRIMARY KEY, status TEXT NOT NULL, summary TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
         self.db.execute("CREATE TABLE IF NOT EXISTS successful_bookings (date TEXT NOT NULL, account_id TEXT NOT NULL, reservation_key TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(date, account_id, reservation_key))")
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS room_round_robin ("
+            "account_id TEXT NOT NULL, library TEXT NOT NULL, floor TEXT NOT NULL, "
+            "next_index INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(account_id, library, floor)"
+            ")"
+        )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS account_initialization ("
+            "account_id TEXT PRIMARY KEY, status TEXT NOT NULL, login_verified INTEGER NOT NULL DEFAULT 0, "
+            "home_verified INTEGER NOT NULL DEFAULT 0, my_reservations_verified INTEGER NOT NULL DEFAULT 0, "
+            "capabilities TEXT NOT NULL DEFAULT '{}', last_verified_at TEXT, message TEXT NOT NULL DEFAULT ''"
+            ")"
+        )
         self._ensure_column("reservations", "message", "TEXT DEFAULT ''")
         self.db.commit()
 
@@ -118,6 +131,87 @@ class Repository:
             (date, self.account_id),
         ).fetchone()
         return int(row[0])
+
+    def next_room_round_robin(self, library: str, floor: str, rooms: list[str]) -> str:
+        candidates = [str(room).strip() for room in rooms if str(room).strip()]
+        if not candidates:
+            raise ValueError("当前楼层没有可轮询的阅览室")
+        library = str(library or "").strip()
+        floor = str(floor or "").strip()
+        if not library:
+            raise ValueError("阅览室轮询必须指定图书馆")
+        if not floor:
+            raise ValueError("阅览室轮询必须指定楼层")
+        row = self.db.execute(
+            "SELECT next_index FROM room_round_robin WHERE account_id=? AND library=? AND floor=?",
+            (self.account_id, library, floor),
+        ).fetchone()
+        index = int(row[0]) if row else 0
+        selected = candidates[index % len(candidates)]
+        next_index = index + 1
+        self.db.execute(
+            "REPLACE INTO room_round_robin(account_id, library, floor, next_index) VALUES (?, ?, ?, ?)",
+            (self.account_id, library, floor, next_index),
+        )
+        self.db.commit()
+        return selected
+
+    def initialization_state(self) -> dict:
+        row = self.db.execute(
+            "SELECT account_id, status, login_verified, home_verified, my_reservations_verified, "
+            "capabilities, last_verified_at, message FROM account_initialization WHERE account_id=?",
+            (self.account_id,),
+        ).fetchone()
+        if row is None:
+            return {
+                "account_id": self.account_id,
+                "status": "pending",
+                "login_verified": False,
+                "home_verified": False,
+                "my_reservations_verified": False,
+                "capabilities": {},
+                "last_verified_at": None,
+                "message": "请先初始化账号后再运行预约",
+            }
+        try:
+            capabilities = json.loads(row[5])
+        except (TypeError, json.JSONDecodeError):
+            capabilities = {}
+        return {
+            "account_id": row[0],
+            "status": row[1],
+            "login_verified": bool(row[2]),
+            "home_verified": bool(row[3]),
+            "my_reservations_verified": bool(row[4]),
+            "capabilities": capabilities if isinstance(capabilities, dict) else {},
+            "last_verified_at": row[6],
+            "message": row[7],
+        }
+
+    def save_initialization_state(
+        self,
+        status: str,
+        login_verified: bool,
+        home_verified: bool,
+        my_reservations_verified: bool,
+        capabilities: dict | None = None,
+        message: str = "",
+    ):
+        self.db.execute(
+            "REPLACE INTO account_initialization("
+            "account_id, status, login_verified, home_verified, my_reservations_verified, capabilities, last_verified_at, message"
+            ") VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)",
+            (
+                self.account_id,
+                status,
+                int(bool(login_verified)),
+                int(bool(home_verified)),
+                int(bool(my_reservations_verified)),
+                json.dumps(capabilities or {}, ensure_ascii=False),
+                message,
+            ),
+        )
+        self.db.commit()
 
 
 def _to_minutes(value: str) -> int:

@@ -1,7 +1,7 @@
 import json
 from unittest.mock import patch
 
-from seat_assistant.notifications import WeComNotifier, render_reservation, send_reservation_notification
+from seat_assistant.notifications import WeComNotifier, render_initialization, render_reservation, render_scheduler_summary, send_initialization_notification, send_reservation_notification
 from seat_assistant.reservation import SeatResult
 
 
@@ -33,6 +33,18 @@ def test_render_reservation_includes_booking_details_and_checkin_rule():
     assert "四层阅览室" in text
     assert "169" in text
     assert "签到" in text
+
+
+def test_render_reservation_marks_submitted_pending_verification_clearly():
+    text = render_reservation(
+        "2026-08-20",
+        "手动",
+        SeatResult(False, "4层计算机类借阅区", "169", "已提交，页面提示预约成功，但历史接口尚未出现匹配记录", conclusive=False),
+        "09:00",
+        "12:00",
+    )
+
+    assert text.splitlines()[0] == "2026-08-20 手动预约已提交，待核验"
 
 
 def test_wecom_notifier_posts_text_payload_and_accepts_success_response():
@@ -86,3 +98,21 @@ def test_send_reservation_notification_isolates_notifier_exception():
     result = SeatResult(False, message="提交结果不明确", conclusive=False)
 
     assert send_reservation_notification(BrokenNotifier(), "2026-08-20", "手动", result, "15:00", "17:00") is False
+
+
+def test_initialization_and_scheduler_notifications_identify_account():
+    initialization = render_initialization("alice", {"status": "ready", "message": "验证成功"})
+    scheduler = render_scheduler_summary("alice", "2026-08-22", {"status": "skipped", "message": "请先初始化账号"})
+
+    assert "alice" in initialization
+    assert "初始化" in initialization
+    assert "alice" in scheduler
+    assert "请先初始化账号" in scheduler
+
+
+def test_send_initialization_notification_isolates_notifier_exception():
+    class BrokenNotifier:
+        def send(self, text):
+            raise OSError("network down")
+
+    assert send_initialization_notification(BrokenNotifier(), "alice", {"status": "failed", "message": "接口失败"}) is False

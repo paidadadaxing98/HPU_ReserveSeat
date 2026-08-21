@@ -1,6 +1,9 @@
 from datetime import datetime, timedelta
 import time
 
+from .initialization import initialization_skip_message
+from .notifications import send_scheduler_notification
+
 
 def next_booking_time(now: datetime) -> datetime:
     target = now.replace(hour=19, minute=30, second=0, microsecond=0)
@@ -11,6 +14,17 @@ def run_once(service, day: str):
     previous = service.repo.scheduler_run(day)
     if previous and previous["status"] == "completed":
         return previous["summary"]
+
+    if getattr(service.settings, "require_initialization", False):
+        state = service.repo.initialization_state()
+        if state["status"] != "ready":
+            summary = {
+                "status": "skipped",
+                "account_id": getattr(service, "account_id", "default"),
+                "message": initialization_skip_message(state),
+            }
+            service.repo.save_scheduler_run(day, "skipped", summary)
+            return summary
 
     results = {}
     reserved_count = 0
@@ -53,4 +67,5 @@ def run_accounts_once(services, day: str, interval_seconds: float = 15.0):
             results[account_id] = service.run_once(day)
         except Exception as exc:
             results[account_id] = {"status": "uncertain", "success": False, "message": f"账号运行异常：{exc}"}
+        send_scheduler_notification(getattr(service, "notifier", None), account_id, day, results[account_id])
     return results
