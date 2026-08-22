@@ -140,7 +140,8 @@ async def run(
         seat_rule_values=seat_values,
         prompt_periods=not (bool(seat_values) or time_values is not None),
     )
-    account_label = (settings.wecom_aliases[0] if getattr(settings, "wecom_aliases", ()) else settings.account_id)
+    refreshed = load_account_settings(settings.account_id)
+    account_label = (refreshed.wecom_aliases[0] if getattr(refreshed, "wecom_aliases", ()) else refreshed.account_id)
     send_initialization_notification(WeComNotifier(settings.wecom_webhook), settings.account_id, state, account_label)
     if state["status"] != "ready":
         print(f"初始化未完成：{state.get('message') or '请检查登录和接口'}")

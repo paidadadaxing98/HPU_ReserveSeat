@@ -58,6 +58,39 @@ def test_initialize_workflow_persists_preferences_without_booking_calls(tmp_path
     assert '"12:00"' in saved
 
 
+def test_initialize_workflow_persists_wecom_aliases(tmp_path):
+    config_path = tmp_path / "accounts.json"
+    config_path.write_text(
+        '{"accounts":[{"id":"alice","enabled":true,"account":"1001",'
+        '"password":"secret"}]}',
+        encoding="utf-8",
+    )
+
+    class FakeVerifier:
+        async def verify(self):
+            return {
+                "home": True,
+                "my_reservations": True,
+                "capabilities": {"history": True},
+                "library_catalog": ["老图", "新图"],
+                "rooms_by_library": {"新图": ["4层新图一号自习室"]},
+            }
+
+    asyncio.run(run_interactive_initialization(
+        account_id="alice",
+        settings=Settings(control_token="local-token", db_path=str(tmp_path / "alice.sqlite")),
+        config_path=config_path,
+        verifier=FakeVerifier(),
+        input_fn=iter(["1", "2", "张三, zs", "", "", "", ""]).__next__,
+        output_fn=lambda _: None,
+    ))
+
+    saved = config_path.read_text(encoding="utf-8")
+    assert '"wecom_aliases": [' in saved
+    assert '"张三"' in saved
+    assert '"zs"' in saved
+
+
 def test_floor_initialization_does_not_ask_for_a_room_again(tmp_path):
     config_path = tmp_path / "accounts.json"
     config_path.write_text(

@@ -56,6 +56,7 @@ class Settings:
     wecom_bot_lock_file: str = "logs/wecom-bot.lock"
     wecom_aliases: tuple[str, ...] = ()
     notify_reservation_results: bool = True
+    notify_scheduler_summary: bool = False
     login_url: str = "https://seatlib.hpu.edu.cn/libseat/"
     max_reservations_per_run: int = 1
     daily_success_limit: int = 5

@@ -190,6 +190,18 @@ def seat_preference_from_input(mode: str, value: str | None = None) -> dict:
     raise ValueError("座位偏好只能是 random、floor 或 seats")
 
 
+def wecom_aliases_from_input(value: str | None, current: tuple[str, ...] = ()) -> tuple[str, ...]:
+    text = str(value or "").strip()
+    if not text:
+        return tuple(str(item).strip() for item in current if str(item).strip())
+    aliases = []
+    for item in re.split(r"[,\n，]+", text):
+        alias = str(item).strip()
+        if alias and alias not in aliases:
+            aliases.append(alias)
+    return tuple(aliases) if aliases else tuple(str(item).strip() for item in current if str(item).strip())
+
+
 def choose_numbered_option(
     options: list[str],
     value: str,
@@ -272,6 +284,7 @@ def update_account_initialization(
     account_id: str,
     periods: dict[str, tuple[str, str]],
     seat_preference: dict,
+    wecom_aliases: tuple[str, ...] | list[str] | None = None,
     location_preference: dict | None = None,
     seat_rules: list[dict] | None = None,
     enabled_periods: dict[str, bool] | None = None,
@@ -291,6 +304,8 @@ def update_account_initialization(
     initialization["seat_preference"] = seat_preference
     if seat_rules is not None:
         initialization["seat_rules"] = seat_rules
+    if wecom_aliases is not None:
+        target["wecom_aliases"] = [str(value).strip() for value in wecom_aliases if str(value).strip()]
     if location_preference is not None:
         initialization["location_preference"] = location_preference
         initialization["library"] = location_preference["library"]
@@ -362,6 +377,11 @@ async def run_interactive_initialization(
 
     current_location = getattr(settings, "location_preference", None) or {}
     current_preference = getattr(settings, "seat_preference", None) or {}
+    current_aliases = tuple(
+        str(value).strip()
+        for value in getattr(settings, "wecom_aliases", ())
+        if str(value).strip()
+    )
     library_catalog = [
         str(item).strip()
         for item in verification.get("library_catalog", [])
@@ -480,6 +500,8 @@ async def run_interactive_initialization(
             )
             preference = seats
             floor = ""
+    output_fn("请输入别名（可多个，逗号分隔；直接回车保持当前别名）：")
+    wecom_aliases = wecom_aliases_from_input(_read_input(input_fn, "别名："), current_aliases)
     # A normal interactive reinitialization replaces the old precise rules
     # with the newly selected location/seat preference. Leaving this as None
     # would make the persistence layer retain stale rules from a prior run.
@@ -501,7 +523,7 @@ async def run_interactive_initialization(
                     output_fn(f"输入无效：{exc}请重新输入。")
     location = location_preference_from_input(library, floor, room)
     update_account_initialization(
-        config_path, account_id, periods, preference, location, resolved_rules, enabled_periods
+        config_path, account_id, periods, preference, wecom_aliases, location, resolved_rules, enabled_periods
     )
     repository.save_initialization_state(
         status="ready",
@@ -530,7 +552,12 @@ def _read_input(input_fn, prompt: str) -> str:
     try:
         return input_fn(prompt)
     except TypeError:
-        return input_fn()
+        try:
+            return input_fn()
+        except StopIteration:
+            return ""
+    except StopIteration:
+        return ""
 
 
 def _raise_value(message: str):

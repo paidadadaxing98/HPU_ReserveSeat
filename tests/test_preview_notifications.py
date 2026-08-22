@@ -16,11 +16,16 @@ def test_preview_notification_uses_manual_booking_context():
 
     notifier = RecordingNotifier()
     args = SimpleNamespace(date="2026-08-20", start="15:00", end="17:00")
+    args.account_label = "张三"
     result = SeatResult(True, "4层计算机类借阅区", "169", "网页核验成功")
 
     assert send_preview_notification(notifier, args, result) is True
+    assert notifier.messages[0].splitlines()[0] == "账号：张三"
     assert "手动预约成功" in notifier.messages[0]
-    assert "座位：169" in notifier.messages[0]
+    assert "阅览室" in notifier.messages[0]
+    assert "时间：" in notifier.messages[0]
+    assert "说明：" in notifier.messages[0]
+    assert "169" not in notifier.messages[0]
 
 
 def test_reservation_summary_reads_live_api_location_and_time_fields():
@@ -317,6 +322,7 @@ def test_reservation_verification_uses_history_record_before_page_text():
     assert status == "success"
     assert record["stat"] == "RESERVE"
     assert "确认" in message
+    assert "当天全部预约" not in message
 
 
 def test_reservation_verification_reports_explicit_failure_and_unknown_separately():
@@ -326,6 +332,7 @@ def test_reservation_verification_reports_explicit_failure_and_unknown_separatel
     assert failed[0] == "failed"
     assert failed[2].startswith("当天已有预约")
     assert unknown[0] == "uncertain"
+    assert "当天全部预约" not in unknown[2]
 
 
 def test_reservation_verification_reports_all_active_reservations_for_the_day():
@@ -347,8 +354,7 @@ def test_reservation_verification_reports_all_active_reservations_for_the_day():
 
     assert status == "failed"
     assert record is None
-    assert "座位 169" in message
-    assert "20:00-21:00" in message
+    assert message == "当天已有预约"
 
 
 def test_submission_notice_captures_success_and_failure_popups():
@@ -372,6 +378,7 @@ def test_reservation_verification_keeps_success_popup_as_evidence_when_history_i
     assert status == "pending"
     assert record is None
     assert "页面提示预约成功" in message
+    assert "当天全部预约" not in message
 
 
 def test_reservation_verification_uses_unique_time_match_when_location_fields_missing():
@@ -389,6 +396,7 @@ def test_reservation_verification_uses_unique_time_match_when_location_fields_mi
     assert status == "success"
     assert record["begin"] == "09:00"
     assert "时间匹配" in message
+    assert "当天全部预约" not in message
 
 
 def test_reservation_verification_reports_submitted_pending_when_success_has_no_record():
@@ -406,6 +414,7 @@ def test_reservation_verification_reports_submitted_pending_when_success_has_no_
     assert status == "pending"
     assert record is None
     assert "已提交" in message
+    assert "当天全部预约" not in message
 
 
 def test_success_page_keeps_pending_state_when_only_an_old_active_record_exists():
@@ -423,7 +432,7 @@ def test_success_page_keeps_pending_state_when_only_an_old_active_record_exists(
     assert status == "pending"
     assert record is None
     assert "已提交" in message
-    assert "20:00-21:00" in message
+    assert "20:00-21:00" not in message
 
 
 def test_success_page_does_not_reuse_a_pre_submit_incomplete_record():

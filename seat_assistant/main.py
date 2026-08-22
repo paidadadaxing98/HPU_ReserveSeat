@@ -5,12 +5,18 @@ from .service import AssistantService
 from .storage import Repository
 
 
-def build_service(account_id=None, force_real: bool = False, notify_reservation_results: bool = True):
+def build_service(
+    account_id=None,
+    force_real: bool = False,
+    notify_reservation_results: bool = True,
+    notify_scheduler_summary: bool = False,
+):
     """Build one isolated service, optionally selecting an account by id."""
     settings = load_account_settings(account_id)
     if force_real:
         settings.dry_run = False
     settings.notify_reservation_results = notify_reservation_results
+    settings.notify_scheduler_summary = notify_scheduler_summary
     adapter = DryRunReservation() if settings.dry_run else PlaywrightReservation(settings)
     notifier = WeComNotifier(settings.wecom_webhook)
     return settings, AssistantService(settings, Repository(settings.db_path, settings.account_id), adapter, notifier)
@@ -20,6 +26,7 @@ def build_services(
     force_real: bool = False,
     force_dry_run: bool = False,
     notify_reservation_results: bool = True,
+    notify_scheduler_summary: bool = False,
 ):
     """Build one isolated service per configured account."""
     base = load_settings()
@@ -37,6 +44,7 @@ def build_services(
         elif force_dry_run:
             settings.dry_run = True
         settings.notify_reservation_results = notify_reservation_results
+        settings.notify_scheduler_summary = notify_scheduler_summary
         adapter = DryRunReservation() if settings.dry_run else PlaywrightReservation(settings)
         notifier = WeComNotifier(settings.wecom_webhook)
         services.append(AssistantService(settings, Repository(settings.db_path, settings.account_id), adapter, notifier))

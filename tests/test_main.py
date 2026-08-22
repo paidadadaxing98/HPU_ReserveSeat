@@ -19,6 +19,7 @@ def test_build_service_selects_the_requested_account(tmp_path, monkeypatch):
     assert service.account_id == "bob"
     assert service.repo.account_id == "bob"
     assert settings.db_path == str((tmp_path / "accounts" / "bob" / "seat_assistant.db").resolve())
+    assert settings.notify_scheduler_summary is False
 
 
 def test_build_service_loads_dotenv_before_resolving_account_settings(tmp_path, monkeypatch):
@@ -49,6 +50,7 @@ def test_build_services_can_force_real_adapters_for_unattended_tasks(tmp_path, m
     assert len(services) == 1
     assert isinstance(services[0].adapter, PlaywrightReservation)
     assert services[0].settings.dry_run is False
+    assert services[0].settings.notify_scheduler_summary is False
 
 
 def test_build_services_can_force_dry_run_even_when_environment_requests_real(tmp_path, monkeypatch):
@@ -65,3 +67,16 @@ def test_build_services_can_force_dry_run_even_when_environment_requests_real(tm
     assert len(services) == 1
     assert services[0].settings.dry_run is True
     assert not isinstance(services[0].adapter, PlaywrightReservation)
+
+
+def test_build_services_can_enable_scheduler_summary_for_debug(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "accounts.json").write_text(json.dumps({
+        "accounts": [
+            {"id": "alice", "account": "1001", "password": "secret-a"},
+        ]
+    }), encoding="utf-8")
+
+    _, services = build_services(notify_scheduler_summary=True)
+
+    assert services[0].settings.notify_scheduler_summary is True

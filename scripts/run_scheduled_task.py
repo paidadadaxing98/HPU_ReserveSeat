@@ -15,11 +15,12 @@ from seat_assistant.config import _load_dotenv
 from seat_assistant.main import build_services
 from seat_assistant.scheduler import run_accounts_once
 
-
+#定时任务后续改成windows定时任务使用对应命令选项了，而不是让程序一直运行实现
+#所以这个窗口时机检验没什么太大用，甚至还有点碍事
 TRIGGER_WINDOWS = {
-    "morning": (time(22, 00), time(22, 30)),
-    "afternoon": (time(10, 0), time(16, 30)),
-    "evening": (time(19, 30), time(22, 00)),
+    "morning": (time(1, 00), time(22, 30)),
+    "afternoon": (time(1, 0), time(22, 30)),
+    "evening": (time(1, 30), time(22, 00)),
 }
 
 def scheduled_target(period: str, now: datetime) -> tuple[str, str] | None:
@@ -34,7 +35,12 @@ def scheduled_target(period: str, now: datetime) -> tuple[str, str] | None:
     return day.isoformat(), period
 
 
-def run_trigger(period: str, now: datetime | None = None, dry_run: bool = False) -> int:
+def run_trigger(
+    period: str,
+    now: datetime | None = None,
+    dry_run: bool = False,
+    notify_scheduler_summary: bool = False,
+) -> int:
     _load_dotenv()
     now = now or datetime.now()
     target = scheduled_target(period, now)
@@ -49,6 +55,7 @@ def run_trigger(period: str, now: datetime | None = None, dry_run: bool = False)
         force_real=not dry_run,
         force_dry_run=dry_run,
         notify_reservation_results=True,
+        notify_scheduler_summary=notify_scheduler_summary,
     )
     print(f"开始无人值守预约：账号数量={len(services)}，日期={day}，时段={target_period}。")
     results = run_accounts_once(
@@ -75,6 +82,11 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="运行一次无感 Windows 定时预约任务")
     parser.add_argument("--period", choices=tuple(TRIGGER_WINDOWS), required=True)
     parser.add_argument("--dry-run", action="store_true", help="演练模式：不提交真实预约")
+    parser.add_argument(
+        "--notify-scheduler-summary",
+        action="store_true",
+        help="调试模式：额外发送账号定时任务汇总通知",
+    )
     return parser.parse_args(argv)
 
 
@@ -118,7 +130,11 @@ def main(argv=None) -> int:
         with path.open("a", encoding="utf-8") as stream:
             with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
                 print(f"\n[{datetime.now().isoformat(timespec='seconds')}] 收到定时任务：{args.period}")
-                return run_trigger(args.period, dry_run=args.dry_run)
+                return run_trigger(
+                    args.period,
+                    dry_run=args.dry_run,
+                    notify_scheduler_summary=args.notify_scheduler_summary,
+                )
     except Exception as exc:
         with path.open("a", encoding="utf-8") as stream:
             print(f"[{datetime.now().isoformat(timespec='seconds')}] 定时任务异常：{exc}", file=stream)

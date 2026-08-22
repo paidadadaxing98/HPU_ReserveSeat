@@ -177,7 +177,10 @@ def test_reserve_period_notifies_success_after_persisting_result(tmp_path):
     assert result.success is True
     assert len(notifier.messages) == 1
     assert "2026-08-21" in notifier.messages[0]
-    assert "169" in notifier.messages[0]
+    assert "阅览室" in notifier.messages[0]
+    assert "时间：" in notifier.messages[0]
+    assert "说明：" in notifier.messages[0]
+    assert "169" not in notifier.messages[0]
     assert repo.get_reservation("2026-08-21", "morning")["status"] == "reserved"
 
 

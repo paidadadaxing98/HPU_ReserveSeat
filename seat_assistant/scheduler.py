@@ -208,7 +208,8 @@ def run_accounts_once(
                 "account_id": account_id,
                 "message": f"账号运行异常：{exc}",
             }
-        send_scheduler_notification(getattr(service, "notifier", None), account_id, day, results[account_id], account_label)
+        if getattr(settings, "notify_scheduler_summary", False):
+            send_scheduler_notification(getattr(service, "notifier", None), account_id, day, results[account_id], account_label)
     return results
 
 

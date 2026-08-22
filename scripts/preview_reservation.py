@@ -54,6 +54,12 @@ async def main(args):
     interactive = getattr(args, "interactive", True)
     record_success_quota = getattr(args, "record_success_quota", True)
     account_settings = load_account_settings(args.account)
+    args.account_id = account_settings.account_id
+    args.account_label = (
+        account_settings.wecom_aliases[0]
+        if getattr(account_settings, "wecom_aliases", ())
+        else account_settings.account_id
+    )
     cli_preferred = bool(args.preferred)
     if not cli_preferred:
         args.preferred = list(account_settings.preferred_seats)
@@ -503,7 +509,15 @@ def _reservation_storage_key(args) -> str:
 
 
 def send_preview_notification(notifier, args, result) -> bool:
-    sent = send_reservation_notification(notifier, args.date, "手动", result, args.start, args.end)
+    sent = send_reservation_notification(
+        notifier,
+        args.date,
+        "手动",
+        result,
+        args.start,
+        args.end,
+        getattr(args, "account_label", "") or getattr(args, "account_id", ""),
+    )
     if sent:
         print("企业微信通知已发送。")
     else:
@@ -663,22 +677,21 @@ def reservation_verification_status(
     all_details = daily_reservation_details(all_today, day)
     matched = find_matching_reservation(reservations, day, room, seat, start, end, excluded=pre_submit_reservations)
     if matched:
-        return "success", matched, f"网页历史记录已确认；当天全部预约：{all_details}"
+        return "success", matched, "网页历史记录已确认"
     normalized = " ".join((page_text or "").replace("：", ":").split())
     for marker in ("当天已有预约", "已有预约", "只能预约一个", "预约失败", "座位已被占用", "不能预约", "无法预约", "预约冲突"):
         if marker in normalized:
-            suffix = f"；当天全部预约：{all_details}" if all_details else ""
-            return "failed", None, f"{marker}{suffix}"
+            return "failed", None, marker
     if submission_signal[0] == "success":
         time_match = find_reservation_by_day_and_time(reservations, day, start, end, excluded=pre_submit_reservations)
         if time_match:
-            return "success", time_match, f"网页记录按日期和时间匹配（地点字段缺失）；当天全部预约：{all_details}"
+            return "success", time_match, "网页记录按日期和时间匹配（地点字段缺失）"
         if all_details:
-            return "pending", None, f"已提交，页面提示预约成功，但当天记录暂未形成唯一匹配；当天全部预约：{all_details}"
-        return "pending", None, "已提交，页面提示预约成功，但历史接口尚未同步记录；当天全部预约：无"
+            return "pending", None, "已提交，页面提示预约成功，但当天记录暂未形成唯一匹配"
+        return "pending", None, "已提交，页面提示预约成功，但历史接口尚未同步记录"
     if active_today:
-        return "failed", None, f"当天已有其他有效预约，本次请求未生效；当天全部预约：{all_details}"
-    return "uncertain", None, f"提交后未在我的预约历史中找到完全匹配记录；当天全部预约：{all_details or '无'}"
+        return "failed", None, "当天已有其他有效预约，本次请求未生效"
+    return "uncertain", None, "提交后未在我的预约历史中找到完全匹配记录"
 
 
 def daily_reservation_details(reservations: list[dict], day: str) -> str:

@@ -280,3 +280,39 @@ def test_scheduler_notification_summary_contains_account_id_and_reason():
 
     assert "张三" in text
     assert "请先初始化账号" in text
+
+
+def test_run_accounts_once_does_not_send_scheduler_summary_by_default(monkeypatch, tmp_path):
+    class Notifier:
+        def __init__(self):
+            self.messages = []
+
+        def send(self, text):
+            self.messages.append(text)
+            return True
+
+    class Service:
+        def __init__(self):
+            self.account_id = "alice"
+            self.settings = AccountSettings(
+                id="alice",
+                account="1001",
+                password="secret",
+                profile_path=tmp_path / "profile",
+                db_path=tmp_path / "db.sqlite",
+                wecom_aliases=("张三",),
+            )
+            self.notifier = Notifier()
+            self.repo = type("Repo", (), {"get_reservation": lambda self, day, name: None})()
+
+        def run_once(self, day, now=None, target_period=None, persist_results=True):
+            return {"status": "reserved", "message": "ok"}
+
+    service = Service()
+
+    from seat_assistant.scheduler import run_accounts_once
+
+    results = run_accounts_once([service], "2026-08-22")
+
+    assert results["alice"]["status"] == "reserved"
+    assert service.notifier.messages == []

@@ -86,7 +86,8 @@ class AssistantService:
         if result.success and persist_results:
             self.repo.record_successful_booking(quota_day, f"{period_name}:{uuid.uuid4().hex}")
         if getattr(self.settings, "notify_reservation_results", True):
-            send_reservation_notification(self.notifier, day, period_name, result, start, end)
+            account_label = (self.settings.wecom_aliases[0] if getattr(self.settings, "wecom_aliases", ()) else self.account_id)
+            send_reservation_notification(self.notifier, day, period_name, result, start, end, account_label)
         return result
 
     def _live_reservation_block(self, day: str, period_name: str, now: datetime) -> SeatResult | None:

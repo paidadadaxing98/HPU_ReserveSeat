@@ -14,7 +14,7 @@ _PERIOD_LABELS = {
 }
 
 
-def render_reservation(day: str, period: str, result, start: str, end: str) -> str:
+def render_reservation(day: str, period: str, result, start: str, end: str, account_label: str | None = None) -> str:
     label = _PERIOD_LABELS.get(period, period)
     if result.success:
         status = "预约成功"
@@ -24,23 +24,23 @@ def render_reservation(day: str, period: str, result, start: str, end: str) -> s
         status = "预约失败"
     else:
         status = "预约结果不明确"
-    lines = [f"{day} {label}{status}", f"时间：{start} - {end}"]
+    display = account_label or ""
+    lines = []
+    if display:
+        lines.append(f"账号：{display}")
+    lines.extend([f"{day} {label}{status}", f"时间：{start} - {end}"])
     if result.room:
         lines.append(f"阅览室：{result.room}")
-    if result.seat:
-        lines.append(f"座位：{result.seat}")
     if result.message:
         lines.append(f"说明：{result.message}")
-    if result.success:
-        lines.append("请在预约前30分钟至预约后15分钟内现场刷卡签到。")
     return "\n".join(lines)
 
 
-def send_reservation_notification(notifier, day: str, period: str, result, start: str, end: str) -> bool:
+def send_reservation_notification(notifier, day: str, period: str, result, start: str, end: str, account_label: str | None = None) -> bool:
     if notifier is None:
         return False
     try:
-        return bool(notifier.send(render_reservation(day, period, result, start, end)))
+        return bool(notifier.send(render_reservation(day, period, result, start, end, account_label)))
     except Exception as exc:
         logging.getLogger(__name__).warning("预约通知发送失败：%s", exc)
         return False

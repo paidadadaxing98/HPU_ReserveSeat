@@ -26,14 +26,16 @@ def test_render_reservation_includes_booking_details_and_checkin_rule():
         SeatResult(True, "四层阅览室", "169", "ok"),
         "09:00",
         "12:00",
+        "张三",
     )
 
+    assert "账号：张三" in text
     assert "2026-08-21" in text
     assert "上午" in text
     assert "09:00 - 12:00" in text
     assert "四层阅览室" in text
-    assert "169" in text
-    assert "签到" in text
+    assert "169" not in text
+    assert "签到" not in text
 
 
 def test_render_reservation_marks_submitted_pending_verification_clearly():
@@ -121,8 +123,9 @@ def test_send_reservation_notification_renders_and_sends_manual_booking():
     notifier = RecordingNotifier()
     result = SeatResult(True, "4层计算机类借阅区", "169", "网页核验成功")
 
-    assert send_reservation_notification(notifier, "2026-08-20", "手动", result, "15:00", "17:00") is True
+    assert send_reservation_notification(notifier, "2026-08-20", "手动", result, "15:00", "17:00", "张三") is True
     assert len(notifier.messages) == 1
+    assert notifier.messages[0].splitlines()[0] == "账号：张三"
     assert "手动预约成功" in notifier.messages[0]
     assert "15:00 - 17:00" in notifier.messages[0]
 

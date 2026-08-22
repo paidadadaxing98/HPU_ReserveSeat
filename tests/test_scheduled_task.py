@@ -24,7 +24,7 @@ def test_evening_trigger_books_today_evening():
 
 
 def test_missed_morning_trigger_outside_booking_window_is_skipped_safely():
-    assert scheduled_target("morning", datetime(2026, 8, 22, 1, 0)) is None
+    assert scheduled_target("morning", datetime(2026, 8, 22, 23, 0)) is None
 
 
 def test_scheduled_task_supports_explicit_dry_run_switch():
@@ -32,6 +32,19 @@ def test_scheduled_task_supports_explicit_dry_run_switch():
 
     assert args.period == "evening"
     assert args.dry_run is True
+
+
+def test_scheduled_task_defaults_to_small_notifications_only():
+    args = parse_args(["--period", "evening"])
+
+    assert args.period == "evening"
+    assert getattr(args, "notify_scheduler_summary", False) is False
+
+
+def test_scheduled_task_can_enable_scheduler_summary_for_debug():
+    args = parse_args(["--period", "evening", "--notify-scheduler-summary"])
+
+    assert args.notify_scheduler_summary is True
 
 
 def test_run_trigger_does_not_start_bot_before_booking(monkeypatch):
@@ -42,8 +55,8 @@ def test_run_trigger_does_not_start_bot_before_booking(monkeypatch):
     monkeypatch.setattr(
         scheduled_module,
         "build_services",
-        lambda force_real, force_dry_run, notify_reservation_results: (
-            build_calls.append((force_real, force_dry_run, notify_reservation_results)) or
+        lambda force_real, force_dry_run, notify_reservation_results, notify_scheduler_summary: (
+            build_calls.append((force_real, force_dry_run, notify_reservation_results, notify_scheduler_summary)) or
             SimpleNamespace(account_interval_seconds=0, wecom_bot_id="bot", wecom_bot_secret="secret"),
             ["service-a"],
         ),
@@ -62,7 +75,7 @@ def test_run_trigger_does_not_start_bot_before_booking(monkeypatch):
     )
     assert scheduled_module.run_trigger("evening", datetime(2026, 8, 22, 20, 0), dry_run=True) == 0
     assert events == [("booking", ("service-a",), "2026-08-22", "evening", False)]
-    assert build_calls == [(False, True, True)]
+    assert build_calls == [(False, True, True, False)]
 
 
 def test_run_trigger_does_not_start_bot_even_when_credentials_exist(monkeypatch):
@@ -72,7 +85,7 @@ def test_run_trigger_does_not_start_bot_even_when_credentials_exist(monkeypatch)
     monkeypatch.setattr(
         scheduled_module,
         "build_services",
-        lambda force_real, force_dry_run, notify_reservation_results: (
+        lambda force_real, force_dry_run, notify_reservation_results, notify_scheduler_summary=False: (
             SimpleNamespace(account_interval_seconds=0, wecom_bot_id="bot", wecom_bot_secret="secret"),
             ["service-a"],
         ),
