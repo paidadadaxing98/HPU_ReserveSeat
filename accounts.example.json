@@ -6,6 +6,8 @@
       "account": "你的统一认证账号",
       "password": "你的统一认证密码",
       "wecom_webhook": "",
+      "wecom_user_id": "企业微信用户 ID",
+      "wecom_aliases": ["account03", "别名"],
       "initialization": {
         "location_preference": {
           "library": "南校区第二图书馆",

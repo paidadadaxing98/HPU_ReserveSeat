@@ -90,6 +90,22 @@ def send_scheduler_notification(notifier, account_id: str, day: str, summary: di
         return False
 
 
+def render_tweet_push(account_id: str, user_name: str, title: str, url: str, note: str | None = None) -> str:
+
+    lines = [
+        f"账号：{account_id}",
+        f"接收人：{user_name}",
+        f"推文：{title}",
+        f"链接：{url}",
+    ]
+
+    if note:
+
+        lines.append(f"备注：{note}")
+
+    return "\n".join(lines)
+
+
 class WeComNotifier:
     def __init__(self, webhook: str = ""):
         self.webhook = webhook

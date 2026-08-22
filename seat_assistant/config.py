@@ -49,6 +49,11 @@ class Settings:
     db_path: str = "seat_assistant.db"
     control_host: str = "127.0.0.1"
     wecom_webhook: str = ""
+    wecom_bot_id: str = ""
+    wecom_bot_secret: str = ""
+    wecom_bot_ws_url: str = "wss://openws.work.weixin.qq.com"
+    wecom_bot_default_user: str = ""
+    wecom_bot_lock_file: str = "logs/wecom-bot.lock"
     login_url: str = "https://seatlib.hpu.edu.cn/libseat/"
     max_reservations_per_run: int = 1
     daily_success_limit: int = 5
@@ -96,6 +101,8 @@ class AccountSettings:
     profile_path: Path
     db_path: Path
     wecom_webhook: str = ""
+    wecom_user_id: str = ""
+    wecom_aliases: tuple[str, ...] = ()
     login_url: str = "https://seatlib.hpu.edu.cn/libseat/"
     periods: dict[str, Period] = field(default_factory=_default_periods)
     preferred_seats: tuple[str, ...] = ()
@@ -279,6 +286,7 @@ def load_accounts(path: str | None = None) -> list[AccountSettings]:
             profile_path=(Path(".browser-profile")).resolve(),
             db_path=Path(os.getenv("SEAT_DB_PATH", "seat_assistant.db")).resolve(),
             wecom_webhook=os.getenv("SEAT_WECOM_WEBHOOK", "").strip(),
+            wecom_user_id=os.getenv("SEAT_WECOM_BOT_DEFAULT_USER", "").strip(),
             login_url=os.getenv("SEAT_LOGIN_URL", "https://seatlib.hpu.edu.cn/libseat/"),
             location_preference={
                 "library": "南校区第二图书馆",
@@ -352,6 +360,12 @@ def load_accounts(path: str | None = None) -> list[AccountSettings]:
             profile_path=profile,
             db_path=database,
             wecom_webhook=str(entry.get("wecom_webhook", "")).strip(),
+            wecom_user_id=str(entry.get("wecom_user_id", "")).strip(),
+            wecom_aliases=tuple(
+                str(value).strip()
+                for value in (entry.get("wecom_aliases") or [])
+                if str(value).strip()
+            ),
             login_url=str(entry.get("login_url") or os.getenv("SEAT_LOGIN_URL", "https://seatlib.hpu.edu.cn/libseat/")).strip(),
             periods=periods,
             preferred_seats=preferred_seats,
@@ -372,6 +386,11 @@ def load_settings() -> Settings:
         db_path=os.getenv("SEAT_DB_PATH", "seat_assistant.db"),
         control_host=os.getenv("SEAT_CONTROL_HOST", "127.0.0.1"),
         wecom_webhook=os.getenv("SEAT_WECOM_WEBHOOK", ""),
+        wecom_bot_id=os.getenv("SEAT_WECOM_BOT_ID", "").strip(),
+        wecom_bot_secret=os.getenv("SEAT_WECOM_BOT_SECRET", "").strip(),
+        wecom_bot_ws_url=os.getenv("SEAT_WECOM_BOT_WS_URL", "wss://openws.work.weixin.qq.com").strip(),
+        wecom_bot_default_user=os.getenv("SEAT_WECOM_BOT_DEFAULT_USER", "").strip(),
+        wecom_bot_lock_file=os.getenv("SEAT_WECOM_BOT_LOCK_FILE", "logs/wecom-bot.lock").strip(),
         login_url=os.getenv("SEAT_LOGIN_URL", "https://seatlib.hpu.edu.cn/libseat/"),
         max_reservations_per_run=int(os.getenv("SEAT_MAX_RESERVATIONS_PER_RUN", "1")),
         daily_success_limit=int(os.getenv("SEAT_DAILY_SUCCESS_LIMIT", "5")),
@@ -406,6 +425,11 @@ def load_account_settings(account_id: str | None = None) -> Settings:
         db_path=str(selected.db_path),
         control_host=base.control_host,
         wecom_webhook=selected.wecom_webhook or base.wecom_webhook,
+        wecom_bot_id=base.wecom_bot_id,
+        wecom_bot_secret=base.wecom_bot_secret,
+        wecom_bot_ws_url=base.wecom_bot_ws_url,
+        wecom_bot_default_user=base.wecom_bot_default_user,
+        wecom_bot_lock_file=base.wecom_bot_lock_file,
         login_url=selected.login_url,
         max_reservations_per_run=base.max_reservations_per_run,
         daily_success_limit=base.daily_success_limit,

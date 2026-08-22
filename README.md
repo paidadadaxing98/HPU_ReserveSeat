@@ -54,6 +54,26 @@
 ```
 
 初始化只验证登录、座位系统首页和“我的预约”接口，不预约座位。它会把位置、座位偏好和学习窗口写回 `accounts.json`，并把初始化状态写入 `accounts/account03/seat_assistant.db`。
+初始化过程中会自动采集并按编号显示三个图书馆各自的阅览室，后续 `--seat 图书馆编号-阅览室编号-座位号` 按这次显示的编号填写。
+
+只想查看编号、不修改初始化配置时，使用：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/list_catalog.py --account account03
+```
+
+这个命令会重新登录并输出全部图书馆和阅览室，例如：
+
+```text
+图书馆 1. 南校区第一图书馆
+  1. ...
+图书馆 2. 南校区第二图书馆
+  1. ...
+图书馆 3. 北校区图书馆
+  1. ...
+```
+
+阅览室编号是当前页面动态采集的结果，不能把某个图书馆的编号用于另一个图书馆。学校调整目录后，请重新执行该命令。
 
 初始化交互顺序：
 
@@ -62,7 +82,7 @@
 3. 具体座位优先时，选择阅览室，再输入座位号，例如 `23 45 85`。
 4. 设置 morning、afternoon、evening 学习窗口；直接回车保留默认值。
 
-当前页面常见的编号如下。初始化时仍以程序现场显示的列表为准，因为阅览室目录可能变化。
+图书馆编号由当前页面动态采集，通常为：
 
 | 图书馆编号 | 图书馆      |
 | -----:| -------- |
@@ -70,26 +90,24 @@
 | 2     | 南校区第二图书馆 |
 | 3     | 北校区图书馆   |
 
-南校区第二图书馆当前阅览室编号：
-
-| 编号  | 阅览室           |
-| ---:| ------------- |
-| 1   | 1层自主学习空间（Ⅰ）   |
-| 2   | 2层报刊阅览区       |
-| 3   | 3F多媒体信息共享空间   |
-| 4   | 3层自主学习空间（Ⅱ）   |
-| 5   | 3层自主学习空间（Ⅲ）   |
-| 6   | 4层工程技术类借阅区    |
-| 7   | 4层计算机类借阅区     |
-| 8   | 5层外文图书原版借阅区   |
-| 9   | 5层工程技术类借阅区    |
-| 10  | 5层自然科学借阅区     |
-| 11  | 6层社会科学借阅区（Ⅰ）  |
-| 12  | 6层社会科学类借阅区（Ⅱ） |
-| 13  | 7层社会科学类借阅区1   |
-| 14  | 7层社会科学类借阅区2   |
-| 15  | 7层自主学习空间（V）   |
-| 16  | 7层自主学习空间（Ⅳ）   |
+| 阅览室编号 | 第二图书馆         | 第一图书馆       | 北图书馆   |
+| -----:| ------------- | ----------- | ------ |
+| 1     | 1层自主学习空间（Ⅰ）   | 中国文学类借阅区    | 负一楼自习室 |
+| 2     | 2层报刊阅览区       | 外国文学类借阅区    | 一楼自习室  |
+| 3     | 3F多媒体信息共享空间   | 文学综合类借阅区    | 三楼自习室A |
+| 4     | 3层自主学习空间（Ⅱ）   | 朗读亭         | 三楼自习室B |
+| 5     | 3层自主学习空间（Ⅲ）   | 三楼天井区       |        |
+| 6     | 4层工程技术类借阅区    | 三楼自主学习空间（Ⅰ） |        |
+| 7     | 4层计算机类借阅区     | 四楼多媒体       |        |
+| 8     | 5层外文图书原版借阅区   | 四楼天井区       |        |
+| 9     | 5层工程技术类借阅区    | 五楼天井区       |        |
+| 10    | 5层自然科学借阅区     | 五楼自主学习空间（Ⅲ） |        |
+| 11    | 6层社会科学借阅区（Ⅰ）  | 五楼自习室       |        |
+| 12    | 6层社会科学类借阅区（Ⅱ） | 六楼自习室       |        |
+| 13    | 7层社会科学类借阅区1   |             |        |
+| 14    | 7层社会科学类借阅区2   |             |        |
+| 15    | 7层自主学习空间（V）   |             |        |
+| 16    | 7层自主学习空间（Ⅳ）   |             |        |
 
 例如“南校区第二图书馆 -> 5层自然科学借阅区 -> 座位 23、45、85”：
 
@@ -218,10 +236,28 @@ Get-ScheduledTask -TaskName `
 Get-ScheduledTaskInfo -TaskName "SeatAssistant-Evening"
 ```
 
-手动触发某一个静默任务：
+按任务查看、修改、测试和恢复：
 
 ```powershell
+# 查看
+Get-ScheduledTask -TaskName "SeatAssistant-Morning"
+Get-ScheduledTaskInfo -TaskName "SeatAssistant-Morning"
+Get-ScheduledTask -TaskName "SeatAssistant-Afternoon"
+Get-ScheduledTaskInfo -TaskName "SeatAssistant-Afternoon"
+Get-ScheduledTask -TaskName "SeatAssistant-Evening"
+Get-ScheduledTaskInfo -TaskName "SeatAssistant-Evening"
+
+# 修改
+.\scripts\install-task.ps1 -MorningAt "22:05" -AfternoonAt "12:30" -EveningAt "19:10" -RepeatMinutes 10
+.\scripts\install-task.ps1 -MorningAt "22:10" -AfternoonAt "12:35" -EveningAt "19:15" -RepeatMinutes 15
+
+# 测试
+Start-ScheduledTask -TaskName "SeatAssistant-Morning"
+Start-ScheduledTask -TaskName "SeatAssistant-Afternoon"
 Start-ScheduledTask -TaskName "SeatAssistant-Evening"
+
+# 恢复
+.\scripts\install-task.ps1
 ```
 
 也可以绕过 Windows 计划任务，直接手动执行同一套静默入口：
@@ -265,9 +301,50 @@ Get-Content ".\logs\scheduled-$(Get-Date -Format yyyy-MM-dd).log" -Wait
 ```dotenv
 SEAT_DRY_RUN=true
 SEAT_WECOM_WEBHOOK=
+SEAT_WECOM_BOT_ID=
+SEAT_WECOM_BOT_SECRET=
+SEAT_WECOM_BOT_WS_URL=wss://openws.work.weixin.qq.com
+SEAT_WECOM_BOT_DEFAULT_USER=
+SEAT_WECOM_BOT_LOCK_FILE=logs/wecom-bot.lock
 ```
 
 `SEAT_DRY_RUN=true` 影响本地服务和相关演练配置；手动 `preview_reservation.py` 是否提交以 `--submit` 为准；静默任务是否演练以安装时的 `-DryRun` 为准。账号密码、Webhook、Cookie、浏览器目录、数据库和日志只保存在本机，不要提交 Git。
+`SEAT_DRY_RUN=true` 影响本地服务和相关演练配置；手动 `preview_reservation.py` 是否提交以 `--submit` 为准；静默任务是否演练以安装时的 `-DryRun` 为准。账号密码、Webhook、Bot Secret、Cookie、浏览器目录、数据库和日志只保存在本机，不要提交 Git。
+
+### 5. 企业微信智能机器人长连接
+
+企业微信智能机器人长连接是独立常驻进程，不会改变现有预约服务和 Windows 定时任务。先在 `.env` 配置机器人参数：
+
+```dotenv
+SEAT_WECOM_BOT_ID=企业微信智能机器人 Bot ID
+SEAT_WECOM_BOT_SECRET=企业微信智能机器人 Secret
+SEAT_WECOM_BOT_WS_URL=wss://openws.work.weixin.qq.com
+SEAT_WECOM_BOT_LOCK_FILE=logs/wecom-bot.lock
+```
+
+再在 `accounts.json` 中给账号配置一对一接收人和别名：
+
+```json
+
+"wecom_user_id": "企业微信用户 ID",
+
+"wecom_aliases": ["account03", "张三"]
+```
+
+启动长连接机器人：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/run_wecom_bot.py
+```
+
+当前支持的推文命令：
+
+```text
+推文 account03 标题 | https://example.test/a
+推文 @张三 标题 | https://example.test/a | 备注
+```
+
+机器人会按消息 ID 去重，断线后自动退避重连，并用 `SEAT_WECOM_BOT_LOCK_FILE` 防止同一台机器重复启动。
 
 ## 常用辅助命令
 

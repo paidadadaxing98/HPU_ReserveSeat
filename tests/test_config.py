@@ -191,6 +191,22 @@ def test_load_account_settings_reads_ordered_seat_rules(monkeypatch, tmp_path):
     ]
 
 
+def test_load_accounts_reads_wecom_direct_user_and_aliases(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "accounts.json").write_text(json.dumps({"accounts": [{
+        "id": "alice",
+        "account": "1001",
+        "password": "secret",
+        "wecom_user_id": "user-a",
+        "wecom_aliases": ["张三", "zs"],
+    }]}), encoding="utf-8")
+
+    account = load_accounts()[0]
+
+    assert account.wecom_user_id == "user-a"
+    assert account.wecom_aliases == ("张三", "zs")
+
+
 def test_load_accounts_rejects_more_than_twenty_accounts(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     payload = {"accounts": [{"id": f"id-{i}", "account": str(i), "password": "secret"} for i in range(MAX_ACCOUNTS + 1)]}
