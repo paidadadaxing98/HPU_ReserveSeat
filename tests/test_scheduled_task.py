@@ -18,8 +18,20 @@ def test_afternoon_trigger_books_today_afternoon():
 
 
 def test_evening_trigger_books_today_evening():
-    assert scheduled_target("evening", datetime(2026, 8, 21, 19, 30)) == (
+    assert scheduled_target("evening", datetime(2026, 8, 21, 19, 20)) == (
         "2026-08-21", "evening"
+    )
+
+
+def test_period04_trigger_books_today_period04():
+    assert scheduled_target("period04", datetime(2026, 8, 21, 10, 5)) == (
+        "2026-08-21", "period04"
+    )
+
+
+def test_period05_trigger_books_today_period05():
+    assert scheduled_target("period05", datetime(2026, 8, 21, 13, 5)) == (
+        "2026-08-21", "period05"
     )
 
 
@@ -32,6 +44,12 @@ def test_scheduled_task_supports_explicit_dry_run_switch():
 
     assert args.period == "evening"
     assert args.dry_run is True
+
+
+def test_scheduled_task_accepts_remaining_periods():
+    args = parse_args(["--period", "period05"])
+
+    assert args.period == "period05"
 
 
 def test_scheduled_task_defaults_to_small_notifications_only():
@@ -73,7 +91,7 @@ def test_run_trigger_does_not_start_bot_before_booking(monkeypatch):
         "_start_wecom_bot_if_configured",
         lambda settings: events.append("bot-start") or object(),
     )
-    assert scheduled_module.run_trigger("evening", datetime(2026, 8, 22, 20, 0), dry_run=True) == 0
+    assert scheduled_module.run_trigger("evening", datetime(2026, 8, 22, 19, 20), dry_run=True) == 0
     assert events == [("booking", ("service-a",), "2026-08-22", "evening", False)]
     assert build_calls == [(False, True, True, False)]
 
@@ -103,5 +121,5 @@ def test_run_trigger_does_not_start_bot_even_when_credentials_exist(monkeypatch)
         lambda settings: events.append("bot-start") or object(),
     )
 
-    assert scheduled_module.run_trigger("evening", datetime(2026, 8, 22, 20, 0), dry_run=True) == 0
+    assert scheduled_module.run_trigger("evening", datetime(2026, 8, 22, 19, 20), dry_run=True) == 0
     assert events == [("booking", ("service-a",), "2026-08-22", "evening", False)]

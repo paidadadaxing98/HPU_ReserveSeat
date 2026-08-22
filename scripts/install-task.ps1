@@ -6,6 +6,8 @@ param(
   [string]$MorningAt = "22:05",
   [string]$AfternoonAt = "12:30",
   [string]$EveningAt = "19:10",
+  [string]$Period04At = "10:05",
+  [string]$Period05At = "13:05",
   [int]$RepeatMinutes = 10
 )
 
@@ -58,7 +60,9 @@ $principal = New-ScheduledTaskPrincipal `
 $definitions = @(
   @{ Name = "SeatAssistant-Morning"; Period = "morning"; At = $MorningAt; Duration = 30 },
   @{ Name = "SeatAssistant-Afternoon"; Period = "afternoon"; At = $AfternoonAt; Duration = 30 },
-  @{ Name = "SeatAssistant-Evening"; Period = "evening"; At = $EveningAt; Duration = 20 }
+  @{ Name = "SeatAssistant-Evening"; Period = "evening"; At = $EveningAt; Duration = 20 },
+  @{ Name = "SeatAssistant-Period04"; Period = "period04"; At = $Period04At; Duration = 20 },
+  @{ Name = "SeatAssistant-Period05"; Period = "period05"; At = $Period05At; Duration = 20 }
 )
 
 foreach ($item in $definitions) {

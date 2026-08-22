@@ -204,6 +204,8 @@
 | `-MorningAt`     | `22:05` | 前一天开始检查次日上午预约 |
 | `-AfternoonAt`   | `12:30` | 当天开始检查下午预约    |
 | `-EveningAt`     | `19:10` | 当天开始检查晚上预约    |
+| `-Period04At`    | `10:05` | 当天开始检查第4段预约    |
+| `-Period05At`    | `13:05` | 当天开始检查第5段预约    |
 | `-RepeatMinutes` | `10`    | 任务触发间隔        |
 
 修改时间后重新安装：
@@ -213,6 +215,8 @@
   -MorningAt "22:05" `
   -AfternoonAt "12:30" `
   -EveningAt "19:10" `
+  -Period04At "10:05" `
+  -Period05At "13:05" `
   -RepeatMinutes 10
 ```
 
@@ -246,15 +250,22 @@ Get-ScheduledTask -TaskName "SeatAssistant-Afternoon"
 Get-ScheduledTaskInfo -TaskName "SeatAssistant-Afternoon"
 Get-ScheduledTask -TaskName "SeatAssistant-Evening"
 Get-ScheduledTaskInfo -TaskName "SeatAssistant-Evening"
+Get-ScheduledTask -TaskName "SeatAssistant-Period04"
+Get-ScheduledTaskInfo -TaskName "SeatAssistant-Period04"
+Get-ScheduledTask -TaskName "SeatAssistant-Period05"
+Get-ScheduledTaskInfo -TaskName "SeatAssistant-Period05"
 
 # 修改
 .\scripts\install-task.ps1 -MorningAt "22:05" -AfternoonAt "12:30" -EveningAt "19:10" -RepeatMinutes 10
 .\scripts\install-task.ps1 -MorningAt "22:10" -AfternoonAt "12:35" -EveningAt "19:15" -RepeatMinutes 15
+.\scripts\install-task.ps1 -MorningAt "22:05" -AfternoonAt "12:30" -EveningAt "19:10" -Period04At "10:05" -Period05At "13:05" -RepeatMinutes 10
 
 # 测试
 Start-ScheduledTask -TaskName "SeatAssistant-Morning"
 Start-ScheduledTask -TaskName "SeatAssistant-Afternoon"
 Start-ScheduledTask -TaskName "SeatAssistant-Evening"
+Start-ScheduledTask -TaskName "SeatAssistant-Period04"
+Start-ScheduledTask -TaskName "SeatAssistant-Period05"
 
 # 恢复
 .\scripts\install-task.ps1

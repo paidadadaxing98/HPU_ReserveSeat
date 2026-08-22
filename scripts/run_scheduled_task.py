@@ -15,12 +15,12 @@ from seat_assistant.config import _load_dotenv
 from seat_assistant.main import build_services
 from seat_assistant.scheduler import run_accounts_once
 
-#定时任务后续改成windows定时任务使用对应命令选项了，而不是让程序一直运行实现
-#所以这个窗口时机检验没什么太大用，甚至还有点碍事
 TRIGGER_WINDOWS = {
-    "morning": (time(1, 00), time(22, 30)),
-    "afternoon": (time(1, 0), time(22, 30)),
-    "evening": (time(1, 30), time(22, 00)),
+    "morning": (time(22, 0), time(22, 30)),
+    "afternoon": (time(12, 30), time(13, 0)),
+    "evening": (time(19, 10), time(19, 30)),
+    "period04": (time(10, 0), time(10, 30)),
+    "period05": (time(13, 0), time(13, 30)),
 }
 
 def scheduled_target(period: str, now: datetime) -> tuple[str, str] | None:
