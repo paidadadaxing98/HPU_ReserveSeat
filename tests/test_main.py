@@ -49,3 +49,19 @@ def test_build_services_can_force_real_adapters_for_unattended_tasks(tmp_path, m
     assert len(services) == 1
     assert isinstance(services[0].adapter, PlaywrightReservation)
     assert services[0].settings.dry_run is False
+
+
+def test_build_services_can_force_dry_run_even_when_environment_requests_real(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("SEAT_DRY_RUN=false\n", encoding="utf-8")
+    (tmp_path / "accounts.json").write_text(json.dumps({
+        "accounts": [
+            {"id": "alice", "account": "1001", "password": "secret-a"},
+        ]
+    }), encoding="utf-8")
+
+    _, services = build_services(force_dry_run=True)
+
+    assert len(services) == 1
+    assert services[0].settings.dry_run is True
+    assert not isinstance(services[0].adapter, PlaywrightReservation)

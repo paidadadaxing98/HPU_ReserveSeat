@@ -1165,12 +1165,27 @@ async def wait_for_time_option(page, value, label, timeout_ms=30000):
 
 
 async def close_time_dialog(page):
-    buttons = page.locator(".el-dialog:visible .el-dialog__headerbtn")
+    dialogs = page.locator(".el-dialog:visible")
+    buttons = dialogs.locator(".el-dialog__headerbtn")
     if await buttons.count():
         await buttons.last.click()
     else:
         await page.keyboard.press("Escape")
     await page.wait_for_timeout(300)
+    for selector in (".el-dialog:visible", ".reserve-time-Mask:visible"):
+        locator = page.locator(selector)
+        target = getattr(locator, "first", locator)
+        try:
+            await target.wait_for(state="hidden", timeout=3000)
+            continue
+        except Exception:
+            pass
+        try:
+            count = await locator.count()
+        except Exception:
+            count = 0
+        if count:
+            raise RuntimeError(f"时间选择弹层未关闭，阻塞层仍可见：{selector}")
 
 
 async def close_success_dialog(page, timeout_ms=5000):

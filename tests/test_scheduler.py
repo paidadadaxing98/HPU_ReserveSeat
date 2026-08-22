@@ -252,10 +252,31 @@ def test_run_once_skips_uninitialized_configured_account_without_reservation_cal
     assert adapter.reserve_calls == []
 
 
-def test_scheduler_notification_summary_contains_account_id_and_reason():
-    text = render_scheduler_summary(
-        "alice", "2026-08-22", {"status": "skipped", "message": "请先初始化账号"}
+def test_scheduled_dry_run_does_not_persist_reservation_or_success_quota(tmp_path):
+    adapter = SchedulerAdapter()
+    repo = Repository(str(tmp_path / "db.sqlite"), "alice")
+    settings = Settings(account_id="alice", control_token="local-token")
+    service = AssistantService(settings, repo, adapter)
+
+    result = run_once(
+        service,
+        "2026-08-22",
+        now=datetime(2026, 8, 21, 19, 30),
+        target_period="morning",
+        persist_results=False,
     )
 
-    assert "alice" in text
+    assert result["morning"]["status"] == "dry-run"
+    assert result["morning"]["success"] is True
+    assert repo.get_reservation("2026-08-22", "morning") is None
+    assert repo.successful_booking_count("2026-08-22") == 0
+    assert repo.scheduler_run("2026-08-22")["status"] == "dry-run"
+
+
+def test_scheduler_notification_summary_contains_account_id_and_reason():
+    text = render_scheduler_summary(
+        "alice", "2026-08-22", {"status": "skipped", "message": "请先初始化账号"}, "张三"
+    )
+
+    assert "张三" in text
     assert "请先初始化账号" in text

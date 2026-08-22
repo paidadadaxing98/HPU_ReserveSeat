@@ -21,9 +21,16 @@ class AssistantService:
         day: str,
         now: datetime | None = None,
         target_period: str | None = None,
+        persist_results: bool = True,
     ):
         from .scheduler import run_once
-        return run_once(self, day, now=now, target_period=target_period)
+        return run_once(
+            self,
+            day,
+            now=now,
+            target_period=target_period,
+            persist_results=persist_results,
+        )
 
     def reserve_period(
         self,
@@ -32,6 +39,7 @@ class AssistantService:
         arrival_override: str | None = None,
         quota_day: str | None = None,
         now: datetime | None = None,
+        persist_results: bool = True,
     ):
         if getattr(self.settings, "require_initialization", False):
             state = self.repo.initialization_state()
@@ -73,10 +81,12 @@ class AssistantService:
         except Exception as exc:
             result = SeatResult(False, message=f"预约适配器异常：{exc}", conclusive=False)
         status = "reserved" if result.success else "uncertain" if not result.conclusive else "failed"
-        self.repo.save_reservation(day, period_name, status, start, end, result.room, result.seat, result.message)
-        if result.success:
+        if persist_results:
+            self.repo.save_reservation(day, period_name, status, start, end, result.room, result.seat, result.message)
+        if result.success and persist_results:
             self.repo.record_successful_booking(quota_day, f"{period_name}:{uuid.uuid4().hex}")
-        send_reservation_notification(self.notifier, day, period_name, result, start, end)
+        if getattr(self.settings, "notify_reservation_results", True):
+            send_reservation_notification(self.notifier, day, period_name, result, start, end)
         return result
 
     def _live_reservation_block(self, day: str, period_name: str, now: datetime) -> SeatResult | None:

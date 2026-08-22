@@ -15,6 +15,7 @@ def run_once(
     day: str,
     now: datetime | None = None,
     target_period: str | None = None,
+    persist_results: bool = True,
 ):
     """Advance one account by at most one reservation task for the day."""
     previous = service.repo.scheduler_run(day)
@@ -22,7 +23,13 @@ def run_once(
         return previous["summary"]
 
     if target_period is not None:
-        return _run_target_period(service, day, target_period, now or datetime.now())
+        return _run_target_period(
+            service,
+            day,
+            target_period,
+            now or datetime.now(),
+            persist_results=persist_results,
+        )
 
     if getattr(service.settings, "require_initialization", False):
         state = service.repo.initialization_state()
@@ -95,12 +102,24 @@ def run_once(
         service.repo.save_scheduler_run(day, final_status, summary)
         return summary
 
-    result = service.reserve_period(day, pending_name, quota_day=day, now=now)
+    result = service.reserve_period(
+        day,
+        pending_name,
+        quota_day=day,
+        now=now,
+        persist_results=persist_results,
+    )
     if result.success:
         results[pending_name] = _period_summary(
-            "reserved", result.message or "预约成功", True, result.room, result.seat
+            "reserved" if persist_results else "dry-run",
+            result.message or "预约成功",
+            True,
+            result.room,
+            result.seat,
         )
-        if _all_tasks_reserved(service, day, enabled):
+        if not persist_results:
+            summary_status = "dry-run"
+        elif _all_tasks_reserved(service, day, enabled):
             summary_status = "completed"
         elif _all_tasks_terminal(service, day, enabled):
             summary_status = "failed"
@@ -152,6 +171,7 @@ def run_accounts_once(
     interval_seconds: float = 15.0,
     now: datetime | None = None,
     target_period: str | None = None,
+    persist_results: bool = True,
 ):
     """Run account services serially, preserving each account's result."""
     results = {}
@@ -159,22 +179,36 @@ def run_accounts_once(
         if index:
             time.sleep(max(0.0, interval_seconds))
         account_id = getattr(service, "account_id", None) or getattr(service.settings, "account_id", "default")
+        settings = getattr(service, "settings", None)
+        account_label = getattr(settings, "wecom_aliases", ()) if settings is not None else ()
+        account_label = account_label[0] if account_label else account_id
         try:
             if target_period is not None:
                 results[account_id] = service.run_once(
-                    day, now=now, target_period=target_period
+                    day,
+                    now=now,
+                    target_period=target_period,
+                    persist_results=persist_results,
                 )
             elif now is not None:
-                results[account_id] = service.run_once(day, now=now)
+                if persist_results:
+                    results[account_id] = service.run_once(day, now=now)
+                else:
+                    results[account_id] = service.run_once(
+                        day, now=now, persist_results=False
+                    )
             else:
-                results[account_id] = service.run_once(day)
+                if persist_results:
+                    results[account_id] = service.run_once(day)
+                else:
+                    results[account_id] = service.run_once(day, persist_results=False)
         except Exception as exc:
             results[account_id] = {
                 "status": "uncertain",
                 "account_id": account_id,
                 "message": f"账号运行异常：{exc}",
             }
-        send_scheduler_notification(getattr(service, "notifier", None), account_id, day, results[account_id])
+        send_scheduler_notification(getattr(service, "notifier", None), account_id, day, results[account_id], account_label)
     return results
 
 
@@ -182,7 +216,13 @@ def _period_summary(status: str, message: str = "", success: bool = False, room:
     return {"status": status, "success": success, "message": message, "room": room, "seat": seat}
 
 
-def _run_target_period(service, day: str, target_period: str, now: datetime) -> dict:
+def _run_target_period(
+    service,
+    day: str,
+    target_period: str,
+    now: datetime,
+    persist_results: bool = True,
+) -> dict:
     """Run only the period represented by one Windows trigger."""
     if getattr(service.settings, "require_initialization", False):
         state = service.repo.initialization_state()
@@ -244,26 +284,41 @@ def _run_target_period(service, day: str, target_period: str, now: datetime) -> 
 
     period = period_map[target_period]
     if _period_expired(day, period, now):
-        service.repo.save_reservation(
-            day,
-            target_period,
-            "missed",
-            period.arrival_window[0],
-            period.arrival_window[1],
-            message="预约窗口已结束，未提交预约",
-        )
+        if persist_results:
+            service.repo.save_reservation(
+                day,
+                target_period,
+                "missed",
+                period.arrival_window[0],
+                period.arrival_window[1],
+                message="预约窗口已结束，未提交预约",
+            )
         results[target_period] = _period_summary("missed", "预约窗口已结束，未提交预约")
         summary = _finish_summary(results, "missed", service, "预约窗口已结束，未提交预约")
         service.repo.save_scheduler_run(day, "missed", summary)
         return summary
 
-    result = service.reserve_period(day, target_period, quota_day=day, now=now)
+    result = service.reserve_period(
+        day,
+        target_period,
+        quota_day=day,
+        now=now,
+        persist_results=persist_results,
+    )
     if result.success:
         results[target_period] = _period_summary(
-            "reserved", result.message or "预约成功", True, result.room, result.seat
+            "reserved" if persist_results else "dry-run",
+            result.message or "预约成功",
+            True,
+            result.room,
+            result.seat,
         )
-        summary_status = "completed" if _all_tasks_reserved(service, day, periods) else "progressed"
-        summary_message = "全部启用学习时段已完成" if summary_status == "completed" else "本次已完成一个预约任务，后续时段等待对应计划任务"
+        if not persist_results:
+            summary_status = "dry-run"
+            summary_message = "演练完成：已跑预约流程，未写入预约记录和成功次数"
+        else:
+            summary_status = "completed" if _all_tasks_reserved(service, day, periods) else "progressed"
+            summary_message = "全部启用学习时段已完成" if summary_status == "completed" else "本次已完成一个预约任务，后续时段等待对应计划任务"
     elif not result.conclusive:
         results[target_period] = _period_summary("uncertain", result.message or "预约结果不明确")
         summary_status = "uncertain"

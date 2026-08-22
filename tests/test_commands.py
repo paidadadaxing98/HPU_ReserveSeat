@@ -5,7 +5,7 @@ from pathlib import Path
 from seat_assistant.storage import Repository
 from scripts import preview_reservation as preview_module
 from scripts.preview_reservation import click_library_option, ensure_initialized_account, library_control_selectors, library_switch_needed, parse_args, refresh_login_captcha, wait_for_authenticated_page
-from scripts.initialize_account import parse_args as parse_initialize_args
+from scripts.initialize_account import parse_args as parse_initialize_args, print_catalog
 
 
 def test_parse_direct_delay():
@@ -68,6 +68,24 @@ def test_initialize_command_accepts_seat_rules_and_three_time_windows():
 
     assert args.seat == ["2-x-x", "2-9-109"]
     assert args.time == ["10:00-12:00", "x", "19:00-21:00"]
+
+
+def test_catalog_output_numbers_rooms_for_every_library(capsys):
+    print_catalog(
+        ["第一图书馆", "第二图书馆", "北校区图书馆"],
+        {
+            "第一图书馆": ["一层自习室", "二层自习室"],
+            "第二图书馆": ["计算机类阅览区"],
+            "北校区图书馆": ["北区阅览室"],
+        },
+    )
+
+    output = capsys.readouterr().out
+    assert "图书馆 1. 第一图书馆" in output
+    assert "  2. 二层自习室" in output
+    assert "图书馆 2. 第二图书馆" in output
+    assert "图书馆 3. 北校区图书馆" in output
+    assert "  1. 北区阅览室" in output
 
 
 def test_direct_reservation_requires_ready_initialization_for_accounts_file(tmp_path):

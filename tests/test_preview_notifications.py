@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 from seat_assistant.reservation import SeatResult
-from scripts.preview_reservation import close_success_dialog, daily_reservation_details, fetch_post_submit_reservations, fetch_user_reservations, fetch_user_reservations_with_capabilities, pause_for_manual_interaction, reservation_summary, reservation_verification_delay, reservation_verification_status, send_preview_notification, submission_notice
+from scripts.preview_reservation import close_success_dialog, close_time_dialog, daily_reservation_details, fetch_post_submit_reservations, fetch_user_reservations, fetch_user_reservations_with_capabilities, pause_for_manual_interaction, reservation_summary, reservation_verification_delay, reservation_verification_status, send_preview_notification, submission_notice
 
 
 def test_preview_notification_uses_manual_booking_context():
@@ -885,3 +885,62 @@ def test_close_success_dialog_uses_escape_instead_of_page_button_when_root_has_n
     assert asyncio.run(close_success_dialog(page)) is True
     assert page.keyboard.pressed == ["Escape"]
     assert page.wrong_page_button.clicked is False
+
+
+def test_close_time_dialog_waits_for_mask_to_disappear():
+    class Mask:
+        def __init__(self):
+            self.hidden = False
+
+        async def wait_for(self, state, timeout):
+            if state == "hidden" and not self.hidden:
+                raise TimeoutError("mask still visible")
+
+        async def count(self):
+            return 1
+
+    class Button:
+        def __init__(self, mask):
+            self.mask = mask
+            self.clicked = False
+
+        @property
+        def last(self):
+            return self
+
+        async def click(self):
+            self.clicked = True
+            self.mask.hidden = True
+
+        async def count(self):
+            return 1
+
+    class Dialogs:
+        def __init__(self, mask):
+            self.mask = mask
+            self.button = Button(mask)
+
+        def locator(self, selector):
+            return self.button
+
+    class Page:
+        def __init__(self):
+            self.mask = Mask()
+            self.dialogs = Dialogs(self.mask)
+            self.keyboard = SimpleNamespace(press=lambda key: (_ for _ in ()).throw(AssertionError("escape fallback should not be used")))
+
+        def locator(self, selector):
+            if selector == ".el-dialog:visible":
+                return self.dialogs
+            if selector == ".reserve-time-Mask:visible":
+                return self.mask
+            raise AssertionError(selector)
+
+        async def wait_for_timeout(self, milliseconds):
+            return None
+
+    page = Page()
+
+    assert asyncio.run(close_time_dialog(page)) is None
+    assert page.dialogs.button.clicked is True
+    assert page.mask.hidden is True

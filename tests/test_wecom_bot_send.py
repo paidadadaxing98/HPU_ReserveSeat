@@ -1,4 +1,6 @@
 from seat_assistant.notifications import render_tweet_push
+from seat_assistant.wecom_bot import WeComBotMessage, WebSocketTransport
+from unittest.mock import patch
 
 
 def test_render_tweet_push_contains_target_and_link():
@@ -26,3 +28,22 @@ def test_wecom_sender_posts_text_to_user_payload():
 
     assert Sender().send_to_user("user-a", "content") is True
     assert requests == [("user-a", "content")]
+
+
+def test_wecom_transport_replies_through_response_url():
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    transport = WebSocketTransport()
+    message = WeComBotMessage("msg-1", "req-1", "sender-a", "内容", response_url="https://example.test/reply")
+
+    with patch("seat_assistant.wecom_bot.urlopen", return_value=FakeResponse()) as opened:
+        assert transport.reply(message, "已收到") is True
+
+    assert opened.call_args.args[0].full_url == "https://example.test/reply"

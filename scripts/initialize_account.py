@@ -69,8 +69,7 @@ class ReadOnlyAccountVerifier:
                     print(f"读取图书馆‘{library}’的阅览室失败：{exc}")
                     rooms_by_library[library] = []
                     catalog_errors[library] = str(exc) or "未知错误"
-            rooms = rooms_by_library.get(libraries[0], []) if libraries else []
-            print("当前可选阅览室：" + ("、".join(rooms) if rooms else "未读取到"))
+            print_catalog(libraries, rooms_by_library, catalog_errors)
             # The homepage normally loads both reservation endpoints. Calling
             # the read-only helper directly also verifies captured auth data.
             reservations, capabilities = await fetch_user_reservations_with_capabilities(page, auth_state)
@@ -81,10 +80,40 @@ class ReadOnlyAccountVerifier:
                 "capabilities": capabilities,
                 "reservation_count": len(reservations),
                 "library_catalog": libraries,
-                "seat_catalog": rooms,
+                "seat_catalog": (
+                    rooms_by_library.get(libraries[0], [])
+                    if libraries
+                    else []
+                ),
                 "rooms_by_library": rooms_by_library,
                 "catalog_errors": catalog_errors,
             }
+
+
+def print_catalog(
+    libraries: list[str],
+    rooms_by_library: dict[str, list[str]],
+    catalog_errors: dict[str, str] | None = None,
+) -> None:
+    """Print every collected library and room with stable, local numbering."""
+    catalog_errors = catalog_errors or {}
+    if not libraries:
+        print("当前未读取到图书馆目录。")
+        return
+    for library_index, library in enumerate(libraries, 1):
+        print(f"图书馆 {library_index}. {library}")
+        rooms = [
+            str(room).strip()
+            for room in rooms_by_library.get(library, [])
+            if str(room).strip()
+        ]
+        if rooms:
+            for room_index, room in enumerate(rooms, 1):
+                print(f"  {room_index}. {room}")
+        elif library in catalog_errors:
+            print(f"  读取失败：{catalog_errors[library]}")
+        else:
+            print("  未读取到阅览室")
 
 
 async def run(
@@ -111,7 +140,8 @@ async def run(
         seat_rule_values=seat_values,
         prompt_periods=not (bool(seat_values) or time_values is not None),
     )
-    send_initialization_notification(WeComNotifier(settings.wecom_webhook), settings.account_id, state)
+    account_label = (settings.wecom_aliases[0] if getattr(settings, "wecom_aliases", ()) else settings.account_id)
+    send_initialization_notification(WeComNotifier(settings.wecom_webhook), settings.account_id, state, account_label)
     if state["status"] != "ready":
         print(f"初始化未完成：{state.get('message') or '请检查登录和接口'}")
         return 1

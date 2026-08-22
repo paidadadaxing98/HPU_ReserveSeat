@@ -270,7 +270,9 @@ Start-ScheduledTask -TaskName "SeatAssistant-Evening"
 .\.venv\Scripts\python.exe -m scripts.run_scheduled_task --period evening
 ```
 
-当前静默任务使用无头浏览器，不弹出窗口、不抢占桌面；每次 Python 进程执行一轮后退出。电脑可以锁屏或睡眠，但必须保持 Windows 用户会话有效、联网且不能关机或注销。日志位于：
+定时任务演练会完整运行账号初始化检查、预约流程和通知流程，但结果只标记为 `dry-run`：不会提交真实预约，不写入 `reservations` 的 `reserved` 记录，也不会增加每日成功预约次数。`--dry-run` 会强制使用演练适配器，不受 `.env` 中 `SEAT_DRY_RUN=false` 影响。真实提交不要加 `--dry-run`，并确认计划任务已用不带 `-DryRun` 的命令重新安装。
+
+当前静默任务使用无头浏览器，不弹出窗口、不抢占桌面；每次 Python 进程执行一轮后退出。定时任务不会启动企业微信智能机器人；机器人仍保留为独立扩展入口，需要时单独运行。定时任务只发送一条账号汇总通知，不再同时发送每个预约结果明细。电脑可以锁屏或睡眠，但必须保持 Windows 用户会话有效、联网且不能关机或注销。日志位于：
 
 ```powershell
 Get-Content ".\logs\scheduled-$(Get-Date -Format yyyy-MM-dd).log" -Wait
@@ -308,8 +310,10 @@ SEAT_WECOM_BOT_DEFAULT_USER=
 SEAT_WECOM_BOT_LOCK_FILE=logs/wecom-bot.lock
 ```
 
-`SEAT_DRY_RUN=true` 影响本地服务和相关演练配置；手动 `preview_reservation.py` 是否提交以 `--submit` 为准；静默任务是否演练以安装时的 `-DryRun` 为准。账号密码、Webhook、Cookie、浏览器目录、数据库和日志只保存在本机，不要提交 Git。
-`SEAT_DRY_RUN=true` 影响本地服务和相关演练配置；手动 `preview_reservation.py` 是否提交以 `--submit` 为准；静默任务是否演练以安装时的 `-DryRun` 为准。账号密码、Webhook、Bot Secret、Cookie、浏览器目录、数据库和日志只保存在本机，不要提交 Git。
+`SEAT_DRY_RUN=true` 影响本地服务和相关演练配置；手动 `preview_reservation.py` 是否提交以 `--submit` 为准；静默任务是否演练以安装时的 `-DryRun` 为准。
+
+账号密码、Webhook、Cookie、浏览器目录、数据库和日志只保存在本机。
+
 
 ### 5. 企业微信智能机器人长连接
 
@@ -325,7 +329,6 @@ SEAT_WECOM_BOT_LOCK_FILE=logs/wecom-bot.lock
 再在 `accounts.json` 中给账号配置一对一接收人和别名：
 
 ```json
-
 "wecom_user_id": "企业微信用户 ID",
 
 "wecom_aliases": ["account03", "张三"]
@@ -344,11 +347,19 @@ SEAT_WECOM_BOT_LOCK_FILE=logs/wecom-bot.lock
 推文 @张三 标题 | https://example.test/a | 备注
 ```
 
-机器人会按消息 ID 去重，断线后自动退避重连，并用 `SEAT_WECOM_BOT_LOCK_FILE` 防止同一台机器重复启动。
+机器人会按消息 ID 去重，断线后自动退避重连，并用 `SEAT_WECOM_BOT_LOCK_FILE` 防止同一台机器重复启动。收到消息后优先使用企业微信回调提供的 `response_url` 回复当前发起人；因此在群里发送命令时，回复会回到当前群会话。跨用户主动私发需要企业微信侧提供对应的主动发送能力，不能仅依赖普通群机器人 Webhook。
 
 ## 常用辅助命令
 
 ```powershell
+# 重置某个账号当天的本地预约状态，恢复为“未执行”
+# 只清理 reservations、successful_bookings、scheduler_runs
+# 不会删除初始化状态、座位偏好、时间窗口和默认到馆时间
+.\.venv\Scripts\python.exe scripts/reset_day.py `
+  --account account03 `
+  --date "2026-08-22" `
+  --yes
+
 # 重新采集指定阅览室的结束时间
 .\.venv\Scripts\python.exe scripts/capture_end_times.py `
   --account account03 `

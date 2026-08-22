@@ -132,6 +132,25 @@ class Repository:
         ).fetchone()
         return int(row[0])
 
+    def reset_day(self, date: str) -> dict[str, int]:
+        """Clear local booking execution state for one account and date."""
+        reservations = self.db.execute(
+            "DELETE FROM reservations WHERE date=?", (date,)
+        ).rowcount
+        successful_bookings = self.db.execute(
+            "DELETE FROM successful_bookings WHERE date=? AND account_id=?",
+            (date, self.account_id),
+        ).rowcount
+        scheduler_runs = self.db.execute(
+            "DELETE FROM scheduler_runs WHERE date=?", (date,)
+        ).rowcount
+        self.db.commit()
+        return {
+            "reservations": reservations,
+            "successful_bookings": successful_bookings,
+            "scheduler_runs": scheduler_runs,
+        }
+
     def next_room_round_robin(self, library: str, floor: str, rooms: list[str]) -> str:
         candidates = [str(room).strip() for room in rooms if str(room).strip()]
         if not candidates:

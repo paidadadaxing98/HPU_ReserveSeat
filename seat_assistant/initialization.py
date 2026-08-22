@@ -480,7 +480,10 @@ async def run_interactive_initialization(
             )
             preference = seats
             floor = ""
-        resolved_rules = None
+    # A normal interactive reinitialization replaces the old precise rules
+    # with the newly selected location/seat preference. Leaving this as None
+    # would make the persistence layer retain stale rules from a prior run.
+    resolved_rules = []
 
     if prompt_periods:
         for name in PERIOD_NAMES:

@@ -78,6 +78,24 @@ def test_repository_success_count_does_not_include_failed_or_uncertain_records(t
     assert repo.successful_booking_count("2026-08-21") == 0
 
 
+def test_repository_reset_day_clears_booking_state_but_keeps_configuration(tmp_path):
+    repo = Repository(str(tmp_path / "assistant.sqlite"), account_id="alice")
+    repo.save_reservation("2026-08-21", "morning", "reserved", "08:30", "12:00")
+    repo.record_successful_booking("2026-08-21", "morning:one")
+    repo.save_scheduler_run("2026-08-21", "waiting", {"status": "waiting"})
+    repo.set_default("morning", "09:00")
+    repo.event("arrival", "morning", "09:00")
+
+    result = repo.reset_day("2026-08-21")
+
+    assert result == {"reservations": 1, "successful_bookings": 1, "scheduler_runs": 1}
+    assert repo.reservations("2026-08-21") == []
+    assert repo.successful_booking_count("2026-08-21") == 0
+    assert repo.scheduler_run("2026-08-21") is None
+    assert repo.default_override("morning") == "09:00"
+    assert repo.events("arrival", "morning") == ["09:00"]
+
+
 def test_repository_round_robins_rooms_per_account_library_and_floor(tmp_path):
     repo = Repository(str(tmp_path / "assistant.sqlite"), account_id="alice")
     rooms = ["3层自主学习空间（Ⅱ）", "4层计算机类借阅区"]

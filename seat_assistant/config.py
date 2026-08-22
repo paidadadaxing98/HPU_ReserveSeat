@@ -54,6 +54,8 @@ class Settings:
     wecom_bot_ws_url: str = "wss://openws.work.weixin.qq.com"
     wecom_bot_default_user: str = ""
     wecom_bot_lock_file: str = "logs/wecom-bot.lock"
+    wecom_aliases: tuple[str, ...] = ()
+    notify_reservation_results: bool = True
     login_url: str = "https://seatlib.hpu.edu.cn/libseat/"
     max_reservations_per_run: int = 1
     daily_success_limit: int = 5
@@ -430,6 +432,7 @@ def load_account_settings(account_id: str | None = None) -> Settings:
         wecom_bot_ws_url=base.wecom_bot_ws_url,
         wecom_bot_default_user=base.wecom_bot_default_user,
         wecom_bot_lock_file=base.wecom_bot_lock_file,
+        wecom_aliases=selected.wecom_aliases,
         login_url=selected.login_url,
         max_reservations_per_run=base.max_reservations_per_run,
         daily_success_limit=base.daily_success_limit,

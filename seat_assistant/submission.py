@@ -380,13 +380,30 @@ def normalize_time_option(value: str) -> str:
 
 
 def time_options(response: dict, key: str) -> list[dict[str, str]]:
-    data = response.get("data", {}) if isinstance(response, dict) else {}
     options = []
-    for item in data.get(key, []) if isinstance(data, dict) else []:
+    for item in _nested_option_values(response, key):
         if not isinstance(item, dict) or not item.get("value"):
             continue
         options.append({"id": str(item.get("id", "")), "value": normalize_time_option(str(item["value"]))})
     return options
+
+
+def _nested_option_values(value, key: str) -> list:
+    """Find an option array through the site's occasionally nested data wrappers."""
+    if isinstance(value, dict):
+        direct = value.get(key)
+        if isinstance(direct, list):
+            return direct
+        for child in value.values():
+            found = _nested_option_values(child, key)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _nested_option_values(child, key)
+            if found:
+                return found
+    return []
 
 
 def time_values(response: dict, key: str) -> list[str]:

@@ -75,6 +75,7 @@ def test_router_sends_push_tweet_to_resolved_user(tmp_path):
             profile_path=tmp_path / "profile",
             db_path=tmp_path / "db.sqlite",
             wecom_user_id="user-a",
+            wecom_aliases=("老三",),
         )
     ]
     sent = []
@@ -88,8 +89,43 @@ def test_router_sends_push_tweet_to_resolved_user(tmp_path):
 
     assert router.handle(message) is True
 
-    assert sent == [("user-a", "账号：account03\n接收人：user-a\n推文：标题\n链接：https://example.test/a")]
+    assert sent == [("user-a", "账号：老三\n接收人：user-a\n推文：标题\n链接：https://example.test/a")]
     assert replies == [("msg-1", "已发送给 user-a")]
+
+
+def test_router_replies_with_tweet_to_sender_response_url(tmp_path):
+    accounts = [
+        AccountSettings(
+            id="account01",
+            account="1001",
+            password="secret",
+            profile_path=tmp_path / "profile",
+            db_path=tmp_path / "db.sqlite",
+            wecom_user_id="user-a",
+            wecom_aliases=("老大",),
+        )
+    ]
+    sent = []
+    replies = []
+    router = WeComCommandRouter(
+        AccountRecipientResolver(accounts),
+        send_to_user=lambda user_id, text: sent.append((user_id, text)) or True,
+        reply=lambda message, text: replies.append((message.message_id, text)) or True,
+    )
+    message = WeComBotMessage(
+        "msg-2",
+        "req-2",
+        "user-a",
+        "推文 老大 标题 | https://example.test/a",
+        response_url="https://example.test/reply",
+    )
+
+    assert router.handle(message) is True
+
+    assert sent == []
+    assert replies == [
+        ("msg-2", "账号：老大\n接收人：user-a\n推文：标题\n链接：https://example.test/a")
+    ]
 
 
 def test_router_replies_when_push_target_is_unknown(tmp_path):

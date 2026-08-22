@@ -1,6 +1,7 @@
 import asyncio
-
 from seat_assistant.config import Settings
+from scripts import initialize_account as initialize_module
+from scripts.initialize_account import ReadOnlyAccountVerifier
 from seat_assistant.initialization import run_interactive_initialization
 
 
@@ -162,6 +163,37 @@ def test_exact_seat_initialization_asks_library_then_room_then_seats(tmp_path):
     assert '"preferred_seats": [\n          "169",\n          "168"\n        ]' in saved
 
 
+def test_reinitializing_without_seat_rules_clears_old_rules(tmp_path):
+    config_path = tmp_path / "accounts.json"
+    config_path.write_text(
+        '{"accounts":[{"id":"alice","enabled":true,"account":"1001",'
+        '"password":"secret","initialization":{"seat_rules":["2-9-023"]}}]}',
+        encoding="utf-8",
+    )
+
+    class FakeVerifier:
+        async def verify(self):
+            return {
+                "home": True,
+                "my_reservations": True,
+                "capabilities": {"history": True},
+                "library_catalog": ["老图", "新图"],
+                "rooms_by_library": {"新图": ["7层新阅览室"]},
+            }
+
+    asyncio.run(run_interactive_initialization(
+        account_id="alice",
+        settings=Settings(control_token="local-token", db_path=str(tmp_path / "alice.sqlite")),
+        config_path=config_path,
+        verifier=FakeVerifier(),
+        input_fn=iter(["3", "2", "1", "181 184", "", "", ""]).__next__,
+        output_fn=lambda _: None,
+    ))
+
+    saved = config_path.read_text(encoding="utf-8")
+    assert '"seat_rules": []' in saved
+
+
 def test_initialize_workflow_fails_when_library_catalog_is_missing(tmp_path):
     config_path = tmp_path / "accounts.json"
     config_path.write_text(
@@ -247,3 +279,81 @@ def test_initialize_workflow_records_failed_state_when_read_only_verification_ra
 
     assert result["status"] == "failed"
     assert "我的预约接口不可用" in result["message"]
+
+
+def test_read_only_verifier_returns_catalog_without_undefined_room_variable(monkeypatch, tmp_path):
+    class FakePage:
+        url = "https://seatlib.hpu.edu.cn/libseat/#/home"
+
+        def on(self, *_args, **_kwargs):
+            return None
+
+        async def goto(self, *_args, **_kwargs):
+            return None
+
+        async def wait_for_timeout(self, *_args, **_kwargs):
+            return None
+
+    class FakeContext:
+        def __init__(self):
+            self.pages = [FakePage()]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+        async def new_page(self):
+            return self.pages[0]
+
+    class FakeBrowser:
+        def __init__(self, *_args, **_kwargs):
+            self.context = FakeContext()
+
+        async def __aenter__(self):
+            return self.context
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    monkeypatch.setattr(initialize_module, "LockedBrowser", FakeBrowser)
+    monkeypatch.setattr(initialize_module, "login_if_configured", lambda *_args: _true_async())
+    monkeypatch.setattr(initialize_module, "wait_for_authenticated_page", lambda *_args, **_kwargs: _noop_async())
+    monkeypatch.setattr(
+        initialize_module,
+        "visible_library_names",
+        lambda *_args: _value_async(["第一图书馆", "第二图书馆"]),
+    )
+    monkeypatch.setattr(initialize_module, "select_library", lambda *_args: _noop_async())
+    monkeypatch.setattr(
+        initialize_module,
+        "visible_room_names",
+        lambda *_args: _value_async(["一层自习室"]),
+    )
+    monkeypatch.setattr(
+        initialize_module,
+        "fetch_user_reservations_with_capabilities",
+        lambda *_args: _value_async(([], {"my_reservations": True, "history": True})),
+    )
+    settings = type(
+        "Settings",
+        (),
+        {"profile_path": str(tmp_path / "profile"), "login_url": "https://example.test"},
+    )()
+    verifier = ReadOnlyAccountVerifier(settings)
+    result = asyncio.run(verifier.verify())
+
+    assert result["seat_catalog"] == ["一层自习室"]
+
+
+async def _true_async():
+    return True
+
+
+async def _noop_async():
+    return None
+
+
+async def _value_async(value):
+    return value

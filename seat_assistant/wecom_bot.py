@@ -4,10 +4,13 @@ from collections import OrderedDict
 from dataclasses import dataclass
 import inspect
 import json
+import logging
 from pathlib import Path
 import threading
 import time
 import uuid
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from .commands import parse_command
 from .notifications import render_tweet_push
@@ -28,6 +31,7 @@ class WeComBotMessage:
 class Recipient:
     account_id: str
     user_id: str
+    display_name: str
 
 
 class MessageDeduplicator:
@@ -185,6 +189,7 @@ class WeComBotRunner:
                         continue
                     self._invoke_handler(message, transport)
             except Exception:
+                logging.getLogger(__name__).warning("企业微信机器人连接断开，准备重连", exc_info=True)
                 if self._stopped:
                     break
             finally:
@@ -235,7 +240,9 @@ class AccountRecipientResolver:
             user_id = str(getattr(account, "wecom_user_id", "") or "").strip()
             if not user_id:
                 continue
-            recipient = Recipient(account.id, user_id)
+            aliases = tuple(str(value).strip() for value in getattr(account, "wecom_aliases", ()) if str(value).strip())
+            display_name = aliases[0] if aliases else account.id
+            recipient = Recipient(account.id, user_id, display_name)
             keys = [account.id, user_id, *getattr(account, "wecom_aliases", ())]
             for key in keys:
                 normalized = str(key).strip().lstrip("@")
@@ -277,13 +284,19 @@ class WeComCommandRouter:
             reply(message, f"未找到推文接收人：{command.target}")
             return False
         content = render_tweet_push(
-            recipient.account_id,
+            recipient.display_name,
             recipient.user_id,
             command.title or "",
             command.url or "",
             command.note,
         )
-        if not send_to_user(recipient.user_id, content):
+        if recipient.user_id == message.sender and message.response_url:
+            sent = reply(message, content)
+            if sent:
+                return True
+        else:
+            sent = send_to_user(recipient.user_id, content)
+        if not sent:
             reply(message, f"推文发送失败：{recipient.user_id}")
             return False
         reply(message, f"已发送给 {recipient.user_id}")
@@ -330,7 +343,11 @@ class WebSocketTransport:
                 text=str(text.get("content") or ""),
                 chat_id=str(body.get("chatid") or ""),
                 chat_type=str(body.get("chattype") or ""),
-                response_url=str(body.get("response_url") or ""),
+                response_url=str(
+                    body.get("response_url")
+                    or payload.get("response_url")
+                    or ""
+                ),
             )
 
 
@@ -353,7 +370,21 @@ class WebSocketTransport:
     def reply(self, message: WeComBotMessage, text: str) -> bool:
 
         if message.response_url:
-            return self.send_to_user(message.sender, text)
+            try:
+                body = json.dumps({
+                    "msgtype": "text",
+                    "text": {"content": text},
+                }, ensure_ascii=False).encode("utf-8")
+                request = Request(
+                    message.response_url,
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=10) as response:
+                    return getattr(response, "status", 200) == 200
+            except (URLError, TimeoutError, ValueError, json.JSONDecodeError):
+                pass
         return self.send_to_user(message.sender, text)
 
 
