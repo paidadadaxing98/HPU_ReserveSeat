@@ -1,12 +1,37 @@
 # Seat Assistant
 
-当前版本：`v0.9.1`
+当前版本：`v1.0.2`
 
 本项目在 Windows 本机运行，通过 Playwright 登录河南理工大学图书馆座位系统，支持账号初始化、手动预约和无感定时预约。
 
 ## 快速开始
 
-### 1. 添加新账号
+### 1. 环境参数准备
+
+1. 复制环境模板：
+
+```powershell
+Copy-Item .env.example .env
+Copy-Item accounts.example.json accounts.json
+```
+
+2. 打开 `.env`，填入本机要用的值，至少确认这些项：
+
+```dotenv
+SEAT_CONTROL_TOKEN=换成你自己的长随机字符串
+SEAT_WECOM_WEBHOOK=你的企业微信 Webhook（需要推送才填）
+SEAT_WECOM_BOT_ID=
+SEAT_WECOM_BOT_SECRET=
+SEAT_DB_PATH=seat_assistant.db
+SEAT_ACCOUNTS_FILE=accounts.json
+```
+
+3. 打开 `accounts.json`，补齐账号信息、别名、Webhook 和初始化配置。
+   如果是多账号模式，建议每个账号都保留自己的 `id`，数据库也会跟着账号分开保存。
+
+4. 第一次运行初始化账号后，程序会自动生成数据库和本地浏览器资料；你通常不需要手工新建 `seat_assistant.db`。
+
+### 2.1 添加新账号
 
 账号命令使用的是 `accounts.json` 中的 `id`，不是学号。编辑项目根目录的 `accounts.json`：
 
@@ -33,7 +58,7 @@
 
 账号 ID 必须唯一。多账号时命令必须带 `--account account03`。
 
-### 2. 初始化账号
+### 2.2 初始化账号
 
 先测试登录：
 
@@ -142,7 +167,7 @@
 查看全部参数：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/initialize_account.py --help
+.\.venv\Scripts\python.exe scripts/initialize_account.py --help 
 ```
 
 ### 3. 手动预约：演练、确认提交、直接提交
@@ -204,8 +229,8 @@
 | `-MorningAt`     | `22:05` | 前一天开始检查次日上午预约 |
 | `-AfternoonAt`   | `12:30` | 当天开始检查下午预约    |
 | `-EveningAt`     | `19:10` | 当天开始检查晚上预约    |
-| `-Period04At`    | `10:05` | 当天开始检查第4段预约    |
-| `-Period05At`    | `13:05` | 当天开始检查第5段预约    |
+| `-Period04At`    | `10:05` | 当天开始检查第4段预约   |
+| `-Period05At`    | `13:05` | 当天开始检查第5段预约   |
 | `-RepeatMinutes` | `10`    | 任务触发间隔        |
 
 修改时间后重新安装：
@@ -324,7 +349,6 @@ SEAT_WECOM_BOT_LOCK_FILE=logs/wecom-bot.lock
 `SEAT_DRY_RUN=true` 影响本地服务和相关演练配置；手动 `preview_reservation.py` 是否提交以 `--submit` 为准；静默任务是否演练以安装时的 `-DryRun` 为准。
 
 账号密码、Webhook、Cookie、浏览器目录、数据库和日志只保存在本机。
-
 
 ### 5. 企业微信智能机器人长连接
 
