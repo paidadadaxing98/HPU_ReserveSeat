@@ -72,10 +72,10 @@
 - [x] **Step 1: Document** one-to-five-period configuration, repeated execution behavior, live reservation waiting, record preservation, and the fact that task installation is intentionally unchanged in this iteration.
 - [x] **Step 2: Run the full pytest suite with the repository temp directory.**
 - [x] **Step 3: Run `compileall` for `scripts` and `seat_assistant`.
-- [x] **Step 4: Review `git diff` and verify no credentials, browser profiles, databases, or Windows task files changed.
+- [x] **Step 4: Review `git diff` and verify no credentials, browser profiles, databases, or unrelated task files changed.
 
 ## v0.8.6 修订记录
 
 - 修复定时预约入口正常完成后读取不到按时段记录的问题。
 - 修复失败和结果不明确时调度器覆盖预约详情的问题。
-- 本地验证：`266 passed`，编译检查和差异空白检查通过。
+- 本地验证：`271 passed`，编译检查和差异空白检查通过。

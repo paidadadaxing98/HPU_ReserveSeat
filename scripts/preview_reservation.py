@@ -74,7 +74,7 @@ async def main(args):
     validate_booking_date(args.date, __import__('datetime').datetime.now())
     args.start = validate_half_hour_time(args.start)
     args.end = validate_half_hour_time(args.end)
-    async with LockedBrowser(profile) as context:
+    async with LockedBrowser(profile, headless=getattr(args, "headless", False)) as context:
         page = context.pages[0] if context.pages else await context.new_page()
         api_auth = {"headers": {}, "token": ""}
         capture_tasks = set()
@@ -453,6 +453,7 @@ async def run_scheduled_reservation(settings, day: str, period: str, start: str,
         confirm_submit=False,
         interactive=False,
         record_success_quota=False,
+        headless=True,
     )
     repository = Repository(str(settings.db_path), settings.account_id)
     try:
@@ -477,7 +478,7 @@ async def fetch_scheduled_current_reservations(settings, day: str) -> list[dict]
     """Read current reservations for scheduling without selecting or submitting."""
     account_settings = settings
     profile = Path(account_settings.profile_path)
-    async with LockedBrowser(profile) as context:
+    async with LockedBrowser(profile, headless=True) as context:
         page = context.pages[0] if context.pages else await context.new_page()
         api_auth = {"headers": {}, "token": ""}
         capture_tasks = set()

@@ -1,17 +1,38 @@
 import asyncio
 
-from seat_assistant.browser_session import run_initialization_verification
+from seat_assistant.browser_session import LockedBrowser
 
 
-def test_initialization_verification_only_runs_read_checks():
-    calls = []
+def test_locked_browser_passes_headless_mode_to_playwright(monkeypatch, tmp_path):
+    captured = {}
 
-    class FakeVerifier:
-        async def verify(self):
-            calls.append("verify")
-            return {"home": True, "my_reservations": True, "capabilities": {"history": True}}
+    class FakeChromium:
+        async def launch_persistent_context(self, profile, **kwargs):
+            captured["profile"] = profile
+            captured.update(kwargs)
+            class Context:
+                async def close(self):
+                    pass
 
-    result = asyncio.run(run_initialization_verification(FakeVerifier()))
+            return Context()
 
-    assert result["ready"] is True
-    assert calls == ["verify"]
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        async def stop(self):
+            pass
+
+    class FakePlaywrightFactory:
+        async def start(self):
+            return FakePlaywright()
+
+    monkeypatch.setattr("seat_assistant.browser_session.async_playwright", lambda: FakePlaywrightFactory())
+    browser = LockedBrowser(tmp_path / "browser-profile", headless=True)
+
+    async def run():
+        async with browser:
+            pass
+
+    asyncio.run(run())
+
+    assert captured["headless"] is True

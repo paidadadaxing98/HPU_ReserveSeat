@@ -12,3 +12,4 @@ site-inspection.json
 __pycache__/
 .pytest_cache/
 .pytest-tmp/
+logs/

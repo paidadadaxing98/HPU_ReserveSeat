@@ -41,12 +41,12 @@ def test_reserve_period_does_not_submit_again_after_success(tmp_path):
     assert repo.get_reservation("2026-08-21", "morning")["status"] == "reserved"
 
 
-def test_reserve_period_blocks_another_period_when_day_already_has_booking(tmp_path):
+def test_reserve_period_blocks_another_period_before_existing_booking_ends(tmp_path):
     adapter = FakeAdapter()
     service, repo = make_service(tmp_path, adapter)
 
-    service.reserve_period("2026-08-21", "evening")
-    result = service.reserve_period("2026-08-21", "afternoon")
+    service.reserve_period("2026-08-21", "evening", now=datetime(2026, 8, 21, 20, 0))
+    result = service.reserve_period("2026-08-21", "afternoon", now=datetime(2026, 8, 21, 20, 0))
 
     assert result.success is False
     assert result.conclusive is True

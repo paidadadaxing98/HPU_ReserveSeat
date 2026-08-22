@@ -16,9 +16,14 @@ class AssistantService:
         self.settings, self.repo, self.adapter, self.notifier = settings, repo, adapter, notifier
         self.account_id = settings.account_id
 
-    def run_once(self, day: str, now: datetime | None = None):
+    def run_once(
+        self,
+        day: str,
+        now: datetime | None = None,
+        target_period: str | None = None,
+    ):
         from .scheduler import run_once
-        return run_once(self, day, now=now)
+        return run_once(self, day, now=now, target_period=target_period)
 
     def reserve_period(
         self,

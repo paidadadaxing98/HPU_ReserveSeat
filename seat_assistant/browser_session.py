@@ -12,8 +12,9 @@ CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
 
 class LockedBrowser:
-    def __init__(self, profile: Path):
+    def __init__(self, profile: Path, headless: bool = False):
         self.profile = Path(profile)
+        self.headless = bool(headless)
         self.lock = AccountLock(self.profile.parent / "account.lock")
         self.playwright = None
         self.context = None
@@ -25,7 +26,7 @@ class LockedBrowser:
             self.context = await self.playwright.chromium.launch_persistent_context(
                 str(self.profile),
                 executable_path=CHROME,
-                headless=False,
+                headless=self.headless,
                 viewport={"width": 1440, "height": 900},
             )
             return self.context

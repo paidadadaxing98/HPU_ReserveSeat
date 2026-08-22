@@ -78,6 +78,23 @@ def test_run_once_stops_after_one_successful_period_when_account_allows_one_book
     assert result["evening"]["status"] == "pending"
 
 
+def test_run_once_for_target_period_does_not_jump_to_a_later_period(tmp_path):
+    adapter = SchedulerAdapter()
+    settings = Settings(control_token="local-token")
+    service = AssistantService(settings, Repository(str(tmp_path / "db.sqlite")), adapter)
+
+    result = run_once(
+        service,
+        "2026-08-21",
+        now=datetime(2026, 8, 21, 20, 0),
+        target_period="afternoon",
+    )
+
+    assert result["afternoon"]["status"] == "missed"
+    assert result["evening"]["status"] == "pending"
+    assert adapter.reserve_calls == []
+
+
 def test_run_once_waits_for_live_reservation_before_submitting_next_period(tmp_path):
     adapter = SchedulerAdapter(current=[{
         "date": "2026-08-21", "begin": "08:30", "end": "12:00", "stat": "RESERVE",
