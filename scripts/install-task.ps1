@@ -1,5 +1,6 @@
 param(
   [switch]$Uninstall,
+  [switch]$DryRun,
   [string]$Python = "$PSScriptRoot\..\.venv\Scripts\python.exe",
   [string]$Project = (Resolve-Path "$PSScriptRoot\..").Path,
   [string]$MorningAt = "22:05",
@@ -69,7 +70,7 @@ foreach ($item in $definitions) {
   }
   $action = New-ScheduledTaskAction `
     -Execute $pythonPath `
-    -Argument "-m scripts.run_scheduled_task --period $($item.Period)" `
+    -Argument ("-m scripts.run_scheduled_task --period $($item.Period)" + $(if ($DryRun) { " --dry-run" } else { "" })) `
     -WorkingDirectory $projectPath
   Register-ScheduledTask `
     -TaskName $item.Name `

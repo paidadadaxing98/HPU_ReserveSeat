@@ -38,13 +38,12 @@ def test_readme_has_quick_start_and_account_id_commands():
     text = Path("README.md").read_text(encoding="utf-8")
 
     assert "## 快速开始" in text
-    assert "--account account02" in text
     assert "scripts/initialize_account.py" in text
-    assert "新账号完整链路" in text
     assert "--account account03" in text
     assert "--submit" in text
-    assert "座位偏好分为三条交互分支" in text
-    assert "自动展开图书馆下拉框" in text
+    assert "选择座位策略" in text
+    assert "自动采集图书馆列表" in text
+    assert "install-task.ps1 -DryRun" in text
 
 
 def test_preview_command_can_use_initialized_room_preference():

@@ -29,7 +29,7 @@ def scheduled_target(period: str, now: datetime) -> tuple[str, str] | None:
     return day.isoformat(), period
 
 
-def run_trigger(period: str, now: datetime | None = None) -> int:
+def run_trigger(period: str, now: datetime | None = None, dry_run: bool = False) -> int:
     _load_dotenv()
     now = now or datetime.now()
     target = scheduled_target(period, now)
@@ -40,7 +40,7 @@ def run_trigger(period: str, now: datetime | None = None) -> int:
     day, target_period = target
     # Scheduled execution is an explicit real-booking path. The normal
     # SEAT_DRY_RUN=true default remains available for manual/service testing.
-    base, services = build_services(force_real=True)
+    base, services = build_services(force_real=not dry_run)
     print(f"开始无人值守预约：账号数量={len(services)}，日期={day}，时段={target_period}。")
     results = run_accounts_once(
         services,
@@ -64,6 +64,7 @@ def log_path(now: datetime | None = None) -> Path:
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="运行一次无感 Windows 定时预约任务")
     parser.add_argument("--period", choices=tuple(TRIGGER_WINDOWS), required=True)
+    parser.add_argument("--dry-run", action="store_true", help="演练模式：不提交真实预约")
     return parser.parse_args(argv)
 
 
@@ -74,7 +75,7 @@ def main(argv=None) -> int:
         with path.open("a", encoding="utf-8") as stream:
             with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
                 print(f"\n[{datetime.now().isoformat(timespec='seconds')}] 收到定时任务：{args.period}")
-                return run_trigger(args.period)
+                return run_trigger(args.period, dry_run=args.dry_run)
     except Exception as exc:
         with path.open("a", encoding="utf-8") as stream:
             print(f"[{datetime.now().isoformat(timespec='seconds')}] 定时任务异常：{exc}", file=stream)
