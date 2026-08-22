@@ -1,6 +1,7 @@
 import json
 
-from seat_assistant.main import build_service
+from seat_assistant.main import build_service, build_services
+from seat_assistant.reservation import PlaywrightReservation
 
 
 def test_build_service_selects_the_requested_account(tmp_path, monkeypatch):
@@ -32,3 +33,19 @@ def test_build_service_loads_dotenv_before_resolving_account_settings(tmp_path, 
     assert settings.account == "1001"
     assert settings.password == "secret"
     assert settings.dry_run is False
+
+
+def test_build_services_can_force_real_adapters_for_unattended_tasks(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("SEAT_DRY_RUN=true\n", encoding="utf-8")
+    (tmp_path / "accounts.json").write_text(json.dumps({
+        "accounts": [
+            {"id": "alice", "account": "1001", "password": "secret-a"},
+        ]
+    }), encoding="utf-8")
+
+    _, services = build_services(force_real=True)
+
+    assert len(services) == 1
+    assert isinstance(services[0].adapter, PlaywrightReservation)
+    assert services[0].settings.dry_run is False

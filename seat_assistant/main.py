@@ -5,20 +5,26 @@ from .service import AssistantService
 from .storage import Repository
 
 
-def build_service(account_id=None):
+def build_service(account_id=None, force_real: bool = False):
     """Build one isolated service, optionally selecting an account by id."""
     settings = load_account_settings(account_id)
+    if force_real:
+        settings.dry_run = False
     adapter = DryRunReservation() if settings.dry_run else PlaywrightReservation(settings)
     notifier = WeComNotifier(settings.wecom_webhook)
     return settings, AssistantService(settings, Repository(settings.db_path, settings.account_id), adapter, notifier)
 
 
-def build_services():
+def build_services(force_real: bool = False):
     """Build one isolated service per configured account."""
     base = load_settings()
+    if force_real:
+        base.dry_run = False
     services = []
     for account in load_accounts():
         settings = load_account_settings(account.id)
+        if force_real:
+            settings.dry_run = False
         adapter = DryRunReservation() if settings.dry_run else PlaywrightReservation(settings)
         notifier = WeComNotifier(settings.wecom_webhook)
         services.append(AssistantService(settings, Repository(settings.db_path, settings.account_id), adapter, notifier))

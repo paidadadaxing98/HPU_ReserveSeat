@@ -4,7 +4,7 @@ from scripts.run_scheduled_task import scheduled_target
 
 
 def test_morning_trigger_books_tomorrow_morning():
-    assert scheduled_target("morning", datetime(2026, 8, 21, 19, 35)) == (
+    assert scheduled_target("morning", datetime(2026, 8, 21, 22, 0)) == (
         "2026-08-22", "morning"
     )
 
@@ -16,7 +16,7 @@ def test_afternoon_trigger_books_today_afternoon():
 
 
 def test_evening_trigger_books_today_evening():
-    assert scheduled_target("evening", datetime(2026, 8, 21, 19, 10)) == (
+    assert scheduled_target("evening", datetime(2026, 8, 21, 19, 30)) == (
         "2026-08-21", "evening"
     )
 

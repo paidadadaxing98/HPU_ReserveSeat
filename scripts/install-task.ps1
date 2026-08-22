@@ -5,7 +5,7 @@ param(
   [string]$MorningAt = "22:05",
   [string]$AfternoonAt = "12:30",
   [string]$EveningAt = "19:10",
-  [int]$RepeatMinutes = 15
+  [int]$RepeatMinutes = 10
 )
 
 $ErrorActionPreference = "Stop"
@@ -55,9 +55,9 @@ $principal = New-ScheduledTaskPrincipal `
   -RunLevel Limited
 
 $definitions = @(
-  @{ Name = "SeatAssistant-Morning"; Period = "morning"; At = $MorningAt; Duration = 60 },
-  @{ Name = "SeatAssistant-Afternoon"; Period = "afternoon"; At = $AfternoonAt; Duration = 60 },
-  @{ Name = "SeatAssistant-Evening"; Period = "evening"; At = $EveningAt; Duration = 60 }
+  @{ Name = "SeatAssistant-Morning"; Period = "morning"; At = $MorningAt; Duration = 30 },
+  @{ Name = "SeatAssistant-Afternoon"; Period = "afternoon"; At = $AfternoonAt; Duration = 30 },
+  @{ Name = "SeatAssistant-Evening"; Period = "evening"; At = $EveningAt; Duration = 20 }
 )
 
 foreach ($item in $definitions) {

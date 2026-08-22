@@ -318,8 +318,6 @@ def load_accounts(path: str | None = None) -> list[AccountSettings]:
         if account_id in {".", ".."} or Path(account_id).name != account_id:
             raise ValueError(f"账号 ID 不是安全目录名：{account_id}")
         if not enabled:
-            if account or password:
-                raise ValueError(f"未启用账号 {account_id} 的账号和密码必须同时为空")
             if account_id in ids:
                 raise ValueError(f"账号 ID 重复：{account_id}")
             ids.add(account_id)

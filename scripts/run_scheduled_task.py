@@ -11,9 +11,9 @@ from seat_assistant.scheduler import run_accounts_once
 
 
 TRIGGER_WINDOWS = {
-    "morning": (time(19, 30), time(22, 30)),
-    "afternoon": (time(12, 0), time(18, 30)),
-    "evening": (time(19, 0), time(22, 0)),
+    "morning": (time(22, 00), time(22, 30)),
+    "afternoon": (time(9, 0), time(18, 30)),
+    "evening": (time(19, 30), time(22, 00)),
 }
 
 
@@ -38,7 +38,9 @@ def run_trigger(period: str, now: datetime | None = None) -> int:
         return 0
 
     day, target_period = target
-    base, services = build_services()
+    # Scheduled execution is an explicit real-booking path. The normal
+    # SEAT_DRY_RUN=true default remains available for manual/service testing.
+    base, services = build_services(force_real=True)
     print(f"开始无人值守预约：账号数量={len(services)}，日期={day}，时段={target_period}。")
     results = run_accounts_once(
         services,
