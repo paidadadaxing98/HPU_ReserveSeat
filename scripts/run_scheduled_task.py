@@ -16,11 +16,11 @@ from seat_assistant.main import build_services
 from seat_assistant.scheduler import run_accounts_once
 
 TRIGGER_WINDOWS = {
-    "morning": (time(22, 0), time(22, 30)),
-    "afternoon": (time(12, 30), time(13, 0)),
-    "evening": (time(19, 10), time(19, 30)),
-    "period04": (time(10, 0), time(10, 30)),
-    "period05": (time(13, 0), time(13, 30)),
+    "morning": (time(7, 0), time(23, 30)),
+    "afternoon": (time(7, 0), time(23, 30)),
+    "evening": (time(7, 0), time(23, 30)),
+    "period04": (time(7, 0), time(23, 30)),
+    "period05": (time(7, 0), time(23, 30)),
 }
 
 def scheduled_target(period: str, now: datetime) -> tuple[str, str] | None:
@@ -31,7 +31,11 @@ def scheduled_target(period: str, now: datetime) -> tuple[str, str] | None:
     current = now.time().replace(second=0, microsecond=0)
     if not start <= current < end:
         return None
-    day = now.date() + timedelta(days=1) if period == "morning" else now.date()
+    morning_next_day = (
+        period == "morning"
+        and time(19, 30) <= current < time(22, 30)
+    )
+    day = now.date() + timedelta(days=1) if morning_next_day else now.date()
     return day.isoformat(), period
 
 

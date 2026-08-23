@@ -5,10 +5,33 @@ from scripts import run_scheduled_task as scheduled_module
 from scripts.run_scheduled_task import parse_args, scheduled_target
 
 
-def test_morning_trigger_books_tomorrow_morning():
+def test_morning_trigger_books_tomorrow_morning_during_previous_evening_window():
     assert scheduled_target("morning", datetime(2026, 8, 21, 22, 0)) == (
         "2026-08-22", "morning"
     )
+
+
+def test_morning_trigger_books_today_morning_during_daytime_window():
+    assert scheduled_target("morning", datetime(2026, 8, 22, 7, 0)) == (
+        "2026-08-22", "morning"
+    )
+
+
+def test_morning_trigger_at_1930_books_tomorrow_morning():
+    assert scheduled_target("morning", datetime(2026, 8, 22, 19, 30)) == (
+        "2026-08-23", "morning"
+    )
+
+
+def test_morning_trigger_at_2230_books_today_morning():
+    assert scheduled_target("morning", datetime(2026, 8, 22, 22, 30)) == (
+        "2026-08-22", "morning"
+    )
+
+
+def test_all_triggers_are_rejected_outside_daily_booking_window():
+    assert scheduled_target("morning", datetime(2026, 8, 22, 6, 59)) is None
+    assert scheduled_target("evening", datetime(2026, 8, 22, 23, 30)) is None
 
 
 def test_afternoon_trigger_books_today_afternoon():
@@ -35,8 +58,8 @@ def test_period05_trigger_books_today_period05():
     )
 
 
-def test_missed_morning_trigger_outside_booking_window_is_skipped_safely():
-    assert scheduled_target("morning", datetime(2026, 8, 22, 23, 0)) is None
+def test_missed_morning_trigger_after_daily_booking_window_is_skipped_safely():
+    assert scheduled_target("morning", datetime(2026, 8, 22, 23, 30)) is None
 
 
 def test_scheduled_task_supports_explicit_dry_run_switch():

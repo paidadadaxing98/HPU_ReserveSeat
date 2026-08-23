@@ -58,7 +58,7 @@ $principal = New-ScheduledTaskPrincipal `
   -RunLevel Limited
 
 $definitions = @(
-  @{ Name = "SeatAssistant-Morning"; Period = "morning"; At = $MorningAt; Duration = 30 },
+  @{ Name = "SeatAssistant-Morning"; Period = "morning"; At = $MorningAt; Duration = 30; FallbackAt = "07:00" },
   @{ Name = "SeatAssistant-Afternoon"; Period = "afternoon"; At = $AfternoonAt; Duration = 30 },
   @{ Name = "SeatAssistant-Evening"; Period = "evening"; At = $EveningAt; Duration = 20 },
   @{ Name = "SeatAssistant-Period04"; Period = "period04"; At = $Period04At; Duration = 20 },
@@ -71,6 +71,10 @@ foreach ($item in $definitions) {
   for ($offset = 0; $offset -le $item.Duration; $offset += $RepeatMinutes) {
     $triggerAt = $at.AddMinutes($offset)
     $triggers += New-ScheduledTaskTrigger -Daily -At $triggerAt
+  }
+  if ($item.FallbackAt) {
+    $fallbackAt = [datetime]::ParseExact($item.FallbackAt, "HH:mm", [Globalization.CultureInfo]::InvariantCulture)
+    $triggers += New-ScheduledTaskTrigger -Daily -At $fallbackAt
   }
   $action = New-ScheduledTaskAction `
     -Execute $pythonPath `
