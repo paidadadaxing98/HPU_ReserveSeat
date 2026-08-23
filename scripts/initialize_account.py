@@ -142,7 +142,7 @@ async def run(
     )
     refreshed = load_account_settings(settings.account_id)
     account_label = (refreshed.wecom_aliases[0] if getattr(refreshed, "wecom_aliases", ()) else refreshed.account_id)
-    send_initialization_notification(WeComNotifier(settings.wecom_webhook), settings.account_id, state, account_label)
+    send_initialization_notification(WeComNotifier(settings.wecom_webhook, login_url=settings.login_url), settings.account_id, state, account_label)
     if state["status"] != "ready":
         print(f"初始化未完成：{state.get('message') or '请检查登录和接口'}")
         return 1

@@ -1,6 +1,7 @@
 import json
 import sqlite3
 from statistics import median
+from datetime import datetime
 from pathlib import Path
 
 
@@ -219,7 +220,7 @@ class Repository:
         self.db.execute(
             "REPLACE INTO account_initialization("
             "account_id, status, login_verified, home_verified, my_reservations_verified, capabilities, last_verified_at, message"
-            ") VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)",
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 self.account_id,
                 status,
@@ -227,6 +228,7 @@ class Repository:
                 int(bool(home_verified)),
                 int(bool(my_reservations_verified)),
                 json.dumps(capabilities or {}, ensure_ascii=False),
+                datetime.now().isoformat(timespec="seconds"),
                 message,
             ),
         )

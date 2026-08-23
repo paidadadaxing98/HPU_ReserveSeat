@@ -76,7 +76,7 @@ async def main(args):
     profile = Path(account_settings.profile_path)
     repository = Repository(str(account_settings.db_path), account_settings.account_id)
     ensure_initialized_account(account_settings, repository)
-    notifier = WeComNotifier(account_settings.wecom_webhook)
+    notifier = WeComNotifier(account_settings.wecom_webhook, login_url=account_settings.login_url)
     validate_booking_date(args.date, __import__('datetime').datetime.now())
     args.start = validate_half_hour_time(args.start)
     args.end = validate_half_hour_time(args.end)
@@ -459,6 +459,7 @@ async def run_scheduled_reservation(settings, day: str, period: str, start: str,
         confirm_submit=False,
         interactive=False,
         record_success_quota=False,
+        notify_result=False,
         headless=True,
     )
     repository = Repository(str(settings.db_path), settings.account_id)
@@ -509,6 +510,8 @@ def _reservation_storage_key(args) -> str:
 
 
 def send_preview_notification(notifier, args, result) -> bool:
+    if not getattr(args, "notify_result", True):
+        return False
     sent = send_reservation_notification(
         notifier,
         args.date,

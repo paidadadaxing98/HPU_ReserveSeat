@@ -20,12 +20,34 @@ def test_preview_notification_uses_manual_booking_context():
     result = SeatResult(True, "4层计算机类借阅区", "169", "网页核验成功")
 
     assert send_preview_notification(notifier, args, result) is True
-    assert notifier.messages[0].splitlines()[0] == "账号：张三"
-    assert "手动预约成功" in notifier.messages[0]
+    assert notifier.messages[0].splitlines()[0] == "## 📌 预约成功确认"
+    assert "| 🔑 **账号** | `张三` |" in notifier.messages[0]
     assert "阅览室" in notifier.messages[0]
-    assert "时间：" in notifier.messages[0]
-    assert "说明：" in notifier.messages[0]
-    assert "169" not in notifier.messages[0]
+    assert "**15:00 — 17:00**" in notifier.messages[0]
+    assert "网页核验成功" in notifier.messages[0]
+    assert "| 💺 **座位** | **169** |" in notifier.messages[0]
+
+
+def test_preview_notification_can_be_suppressed_for_unattended_booking():
+    class RecordingNotifier:
+        def __init__(self):
+            self.messages = []
+
+        def send(self, text):
+            self.messages.append(text)
+            return True
+
+    notifier = RecordingNotifier()
+    args = SimpleNamespace(
+        date="2026-08-20",
+        start="15:00",
+        end="17:00",
+        account_label="张三",
+        notify_result=False,
+    )
+
+    assert send_preview_notification(notifier, args, SeatResult(True)) is False
+    assert notifier.messages == []
 
 
 def test_reservation_summary_reads_live_api_location_and_time_fields():

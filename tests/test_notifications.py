@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from seat_assistant.notifications import WeComNotifier, render_initialization, render_reservation, render_scheduler_summary, send_initialization_notification, send_reservation_notification
+from seat_assistant.notifications import WeComNotifier, render_initialization, render_reservation, render_scheduler_summary, reservation_card, send_initialization_notification, send_reservation_notification
 from seat_assistant.reservation import SeatResult
 
 
@@ -29,13 +29,68 @@ def test_render_reservation_includes_booking_details_and_checkin_rule():
         "张三",
     )
 
-    assert "账号：张三" in text
+    assert "| 🔑 **账号** | `张三` |" in text
     assert "2026-08-21" in text
-    assert "上午" in text
-    assert "09:00 - 12:00" in text
+    assert "**09:00 — 12:00**" in text
     assert "四层阅览室" in text
-    assert "169" not in text
+    assert "| 💺 **座位** | **169** |" in text
     assert "签到" not in text
+
+
+def test_render_reservation_uses_markdown_confirmation_table():
+    text = render_reservation(
+        "2026-08-23",
+        "afternoon",
+        SeatResult(True, "7层社会科学类借阅区1", "169", "网页历史记录已验证"),
+        "15:30",
+        "19:00",
+        "PatrickStar",
+    )
+
+    assert text.startswith("## 📌 预约成功确认")
+    assert "| 🔑 **账号** | `PatrickStar` |" in text
+    assert "| 📅 **日期** | **2026-08-23** (周日) |" in text
+    assert "| ⏰ **时段** | **15:30 — 19:00** |" in text
+    assert "| 🏛️ **阅览室** | **7层社会科学类借阅区1** |" in text
+    assert "| 💺 **座位** | **169** |" in text
+    assert "| ✅ **状态** | 已确认（网页历史记录已验证） |" in text
+
+
+def test_reservation_card_contains_seat_and_required_template_card_fields():
+    payload = reservation_card(
+        "2026-08-23",
+        "afternoon",
+        SeatResult(True, "7层社会科学类借阅区1", "271", "网页历史记录已确认"),
+        "15:30",
+        "19:00",
+        "PatrickStar",
+    )
+
+    card = payload["template_card"]
+    assert payload["msgtype"] == "template_card"
+    assert card["card_type"] == "text_notice"
+    assert card["main_title"]["title"] == "预约成功确认"
+    assert "emphasis_content" not in card
+    assert {item["keyname"]: item["value"] for item in card["horizontal_content_list"]}["时段"] == "15:30 — 19:00"
+    assert {item["keyname"]: item["value"] for item in card["horizontal_content_list"]}["座位"] == "271"
+    assert card["card_action"] == {"type": 1, "url": "https://seatlib.hpu.edu.cn/libseat/#/login"}
+
+
+def test_reservation_card_always_uses_the_booking_site_login_page():
+    payload = reservation_card(
+        "2026-08-23",
+        "evening",
+        SeatResult(True, "阅览室", "271", "已确认"),
+        "20:00",
+        "22:00",
+        "PatrickStar",
+        "https://login.example.test/seat",
+    )
+
+    assert payload["template_card"]["card_action"] == {
+        "type": 1,
+        "url": "https://seatlib.hpu.edu.cn/libseat/#/login",
+    }
 
 
 def test_render_reservation_marks_submitted_pending_verification_clearly():
@@ -47,10 +102,11 @@ def test_render_reservation_marks_submitted_pending_verification_clearly():
         "12:00",
     )
 
-    assert text.splitlines()[0] == "2026-08-20 手动预约已提交，待核验"
+    assert text.splitlines()[0] == "## 📌 预约提交确认"
+    assert "已提交，待核验" in text
 
 
-def test_wecom_notifier_posts_text_payload_and_accepts_success_response():
+def test_wecom_notifier_posts_markdown_payload_and_accepts_success_response():
     notifier = WeComNotifier("https://example.test/webhook")
 
     with patch("seat_assistant.notifications.urlopen", return_value=FakeResponse()) as opened:
@@ -59,8 +115,14 @@ def test_wecom_notifier_posts_text_payload_and_accepts_success_response():
     request = opened.call_args.args[0]
     assert request.full_url == "https://example.test/webhook"
     assert json.loads(request.data.decode("utf-8")) == {
-        "msgtype": "text",
-        "text": {"content": "预约成功"},
+        "msgtype": "template_card",
+        "template_card": {
+            "card_type": "text_notice",
+            "main_title": {"title": "座位助手通知"},
+            "sub_title_text": "预约成功",
+            "horizontal_content_list": [],
+                "card_action": {"type": 1, "url": "https://seatlib.hpu.edu.cn/libseat/#/login"},
+        },
     }
 
 
@@ -106,8 +168,9 @@ def test_wecom_notifier_flushes_queued_messages_before_sending_new_one(tmp_path)
     with patch("seat_assistant.notifications.urlopen", return_value=Response()) as opened:
         assert notifier.send("新消息") is True
 
-    payloads = [json.loads(call.args[0].data.decode("utf-8"))["text"]["content"] for call in opened.call_args_list]
-    assert payloads == ["旧消息", "新消息"]
+    payloads = [json.loads(call.args[0].data.decode("utf-8")) for call in opened.call_args_list]
+    assert [payload["msgtype"] for payload in payloads] == ["template_card", "template_card"]
+    assert [payload["template_card"]["sub_title_text"] for payload in payloads] == ["旧消息", "新消息"]
     assert not (tmp_path / "outbox.jsonl").exists()
 
 
@@ -125,9 +188,9 @@ def test_send_reservation_notification_renders_and_sends_manual_booking():
 
     assert send_reservation_notification(notifier, "2026-08-20", "手动", result, "15:00", "17:00", "张三") is True
     assert len(notifier.messages) == 1
-    assert notifier.messages[0].splitlines()[0] == "账号：张三"
-    assert "手动预约成功" in notifier.messages[0]
-    assert "15:00 - 17:00" in notifier.messages[0]
+    assert notifier.messages[0].splitlines()[0] == "## 📌 预约成功确认"
+    assert "| 🔑 **账号** | `张三` |" in notifier.messages[0]
+    assert "**15:00 — 17:00**" in notifier.messages[0]
 
 
 def test_send_reservation_notification_isolates_notifier_exception():
@@ -144,6 +207,8 @@ def test_initialization_and_scheduler_notifications_identify_account():
     initialization = render_initialization("alice", {"status": "ready", "message": "验证成功"}, "张三")
     scheduler = render_scheduler_summary("alice", "2026-08-22", {"status": "skipped", "message": "请先初始化账号"}, "张三")
 
+    assert initialization.startswith("## 🔧 初始化验证结果")
+    assert scheduler.startswith("## 📋 定时任务结果")
     assert "张三" in initialization
     assert "初始化" in initialization
     assert "张三" in scheduler
@@ -166,8 +231,10 @@ def test_render_scheduler_summary_places_optional_periods_after_evening():
     )
 
     lines = text.splitlines()
-    assert lines.index("晚上：reserved，已预约") < lines.index("第4段：skipped，该学习时段未启用")
-    assert lines.index("第4段：skipped，该学习时段未启用") < lines.index("第5段：skipped，该学习时段未启用")
+    evening_line = next(index for index, line in enumerate(lines) if "| 晚上 | reserved，已预约 |" in line)
+    period04_line = next(index for index, line in enumerate(lines) if "| 第4段 | skipped，该学习时段未启用 |" in line)
+    period05_line = next(index for index, line in enumerate(lines) if "| 第5段 | skipped，该学习时段未启用 |" in line)
+    assert evening_line < period04_line < period05_line
 
 
 def test_send_initialization_notification_isolates_notifier_exception():

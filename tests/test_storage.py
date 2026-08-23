@@ -1,6 +1,18 @@
 import json
+from datetime import datetime
 
 from seat_assistant.storage import Repository
+
+
+def test_repository_saves_initialization_time_in_local_time(tmp_path):
+    repo = Repository(str(tmp_path / "assistant.sqlite"))
+
+    before = datetime.now()
+    repo.save_initialization_state("ready", True, True, True, message="ok")
+    after = datetime.now()
+
+    saved = datetime.fromisoformat(repo.initialization_state()["last_verified_at"])
+    assert before.replace(microsecond=0) <= saved <= after.replace(microsecond=0)
 
 
 def test_repository_persists_reservation_details_and_status(tmp_path):
