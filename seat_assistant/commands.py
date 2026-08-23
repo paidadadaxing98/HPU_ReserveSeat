@@ -60,7 +60,18 @@ def _parse_push_tweet(text: str) -> Command:
     parts = [part for part in parts if part]
     if not target or len(parts) < 2:
         return Command("help")
-    return Command("push_tweet", target=target, title=parts[0], url=parts[1], note=parts[2] if len(parts) > 2 else None)
+    return Command(
+        "push_tweet",
+        target=target,
+        title=parts[0],
+        url=_unwrap_markdown_link(parts[1]),
+        note=parts[2] if len(parts) > 2 else None,
+    )
+
+
+def _unwrap_markdown_link(value: str) -> str:
+    match = re.fullmatch(r"\[([^\]]+)\]\((https?://[^)]+)\)", value.strip())
+    return match.group(2) if match else value.strip()
 
 
 def _valid_time(value: str) -> str | None:

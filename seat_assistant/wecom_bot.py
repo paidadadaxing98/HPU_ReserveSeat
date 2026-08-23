@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from collections import OrderedDict
 from dataclasses import dataclass
 import inspect
 import json
 import logging
 from pathlib import Path
+import queue
 import threading
 import time
 import uuid
@@ -13,7 +15,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from .commands import parse_command
-from .notifications import render_tweet_push
+from .notifications import render_tweet_card, render_tweet_push
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,7 @@ class WeComBotMessage:
     chat_id: str = ""
     chat_type: str = ""
     response_url: str = ""
+    raw_frame: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +152,7 @@ class WeComBotRunner:
         self.heartbeat_interval = heartbeat_interval
         self.reconnect_delays = []
         self._stopped = False
+        self._active_transport = None
 
 
     def can_start(self) -> bool:
@@ -159,6 +163,9 @@ class WeComBotRunner:
     def stop(self) -> None:
 
         self._stopped = True
+        interrupt = getattr(self._active_transport, "interrupt", None)
+        if interrupt is not None:
+            interrupt()
 
 
     def run(self, max_cycles: int | None = None) -> None:
@@ -171,6 +178,7 @@ class WeComBotRunner:
         cycles = 0
         while not self._stopped and (max_cycles is None or cycles < max_cycles):
             transport = self.transport_factory()
+            self._active_transport = transport
             heartbeat_stop = threading.Event()
             heartbeat_thread = None
             try:
@@ -199,6 +207,7 @@ class WeComBotRunner:
                 close = getattr(transport, "close", None)
                 if close:
                     close()
+                self._active_transport = None
             cycles += 1
             if self._stopped or max_cycles is not None and cycles >= max_cycles:
                 break
@@ -290,10 +299,23 @@ class WeComCommandRouter:
             command.url or "",
             command.note,
         )
+        card = render_tweet_card(
+            recipient.display_name,
+            recipient.user_id,
+            command.title or "",
+            command.url or "",
+            command.note,
+        )
+        reply_template_card = getattr(transport, "reply_template_card", None)
+        send_template_card = getattr(transport, "send_template_card", None)
         if recipient.user_id == message.sender and message.response_url:
+            if reply_template_card:
+                return bool(reply_template_card(message, card))
             sent = reply(message, content)
             if sent:
                 return True
+        if send_template_card:
+            sent = send_template_card(recipient.user_id, card)
         else:
             sent = send_to_user(recipient.user_id, content)
         if not sent:
@@ -301,6 +323,189 @@ class WeComCommandRouter:
             return False
         reply(message, f"已发送给 {recipient.user_id}")
         return True
+
+
+def sdk_frame_to_message(frame: dict) -> WeComBotMessage | None:
+    """Convert an official SDK text callback frame to the project message type."""
+    if not isinstance(frame, dict) or frame.get("cmd") != "aibot_msg_callback":
+        return None
+    body = frame.get("body") or {}
+    if body.get("msgtype") != "text":
+        return None
+    text = body.get("text") or {}
+    sender = (body.get("from") or {}).get("userid")
+    content = text.get("content")
+    if not sender or not isinstance(content, str):
+        return None
+    headers = frame.get("headers") or {}
+    request_id = str(headers.get("req_id") or "")
+    message_id = str(body.get("msgid") or body.get("msg_id") or request_id)
+    if not message_id:
+        return None
+    return WeComBotMessage(
+        message_id=message_id,
+        request_id=request_id,
+        sender=str(sender),
+        text=content,
+        chat_id=str(body.get("chatid") or ""),
+        chat_type=str(body.get("chattype") or ""),
+        response_url=str(body.get("response_url") or ""),
+        raw_frame=frame,
+    )
+
+
+class OfficialSdkTransport:
+    """Adapt the official async SDK client to the existing sync transport contract."""
+
+    def __init__(
+        self,
+        client=None,
+        *,
+        ws_url: str = "",
+        heartbeat_interval: int = 30000,
+        bot_outbox_dir: str | Path = "logs/wecom-bot-outbox",
+    ):
+        self._client = client
+        self.ws_url = ws_url
+        self.heartbeat_interval = heartbeat_interval
+        self.bot_outbox_dir = Path(bot_outbox_dir)
+        self._loop = None
+        self._thread = None
+        self._messages = queue.Queue()
+        self._closed = threading.Event()
+
+    def connect(self, bot_id: str, secret: str) -> None:
+        if self._client is None:
+            try:
+                from wecom_aibot_sdk import WSClient
+            except ImportError as exc:
+                raise RuntimeError("缺少 wecom-aibot-sdk 依赖，请安装项目运行依赖") from exc
+            self._client = WSClient(
+                bot_id,
+                secret,
+                ws_url=self.ws_url,
+                heartbeat_interval=self.heartbeat_interval,
+                max_reconnect_attempts=-1,
+            )
+        self._closed.clear()
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+        self._run_sync(self._register_and_connect())
+
+    def _run_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    async def _register_and_connect(self) -> None:
+        self._client.on("message.text", self._on_sdk_text)
+        await self._client.connect()
+
+    def _on_sdk_text(self, frame: dict) -> None:
+        message = sdk_frame_to_message(frame)
+        if message is not None:
+            self._messages.put(message)
+
+    def _run_sync(self, coroutine):
+        if self._loop is None:
+            raise RuntimeError("官方 SDK 尚未连接")
+        if self._thread is None or not self._thread.is_alive():
+            return self._loop.run_until_complete(coroutine)
+        future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        return future.result(timeout=30)
+
+    def iter_messages(self):
+        while not self._closed.is_set():
+            self.deliver_outbox_once()
+            try:
+                yield self._messages.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+    def interrupt(self) -> None:
+        self._closed.set()
+
+    def send_to_user(self, user_id: str, text: str) -> bool:
+        try:
+            result = self._run_sync(self._client.send_message(
+                user_id,
+                {"msgtype": "markdown", "markdown": {"content": text}},
+            ))
+            return not isinstance(result, dict) or result.get("errcode", 0) == 0
+        except Exception:
+            logging.getLogger(__name__).warning("企业微信官方 SDK 主动发送失败", exc_info=True)
+            return False
+
+    def send_template_card(self, user_id: str, card: dict) -> bool:
+        try:
+            result = self._run_sync(self._client.send_message(user_id, card))
+            return not isinstance(result, dict) or result.get("errcode", 0) == 0
+        except Exception:
+            logging.getLogger(__name__).warning("企业微信官方 SDK 卡片发送失败", exc_info=True)
+            return False
+
+    def deliver_outbox_once(self) -> bool:
+        if self._client is None or self._loop is None or not self.bot_outbox_dir.exists():
+            return False
+        delivered = False
+        for path in sorted(self.bot_outbox_dir.glob("*.json")):
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+                user_id = str(item.get("user_id") or "").strip()
+                payload = item.get("payload")
+                if not user_id or not isinstance(payload, dict):
+                    path.unlink(missing_ok=True)
+                    continue
+                if self.send_template_card(user_id, payload):
+                    path.unlink(missing_ok=True)
+                    delivered = True
+            except Exception:
+                logging.getLogger(__name__).warning("企业微信机器人投递箱处理失败：%s", path, exc_info=True)
+        return delivered
+
+    def reply(self, message: WeComBotMessage, text: str) -> bool:
+        if message.raw_frame is None:
+            return self.send_to_user(message.sender, text)
+        try:
+            result = self._run_sync(self._client.reply(
+                message.raw_frame,
+                {"msgtype": "text", "text": {"content": text}},
+            ))
+            return not isinstance(result, dict) or result.get("errcode", 0) == 0
+        except Exception:
+            logging.getLogger(__name__).warning("企业微信官方 SDK 回复失败", exc_info=True)
+            return False
+
+    def reply_template_card(self, message: WeComBotMessage, card: dict) -> bool:
+        if message.raw_frame is None:
+            return self.send_template_card(message.sender, card)
+        try:
+            if hasattr(self._client, "reply_template_card"):
+                result = self._run_sync(self._client.reply_template_card(
+                    message.raw_frame,
+                    card.get("template_card", card),
+                ))
+            else:
+                result = self._run_sync(self._client.reply(message.raw_frame, card))
+            return not isinstance(result, dict) or result.get("errcode", 0) == 0
+        except Exception:
+            logging.getLogger(__name__).warning("企业微信官方 SDK 卡片回复失败", exc_info=True)
+            return False
+
+    def close(self) -> None:
+        self.interrupt()
+        if self._client is not None and self._loop is not None:
+            try:
+                self._run_sync(self._client.disconnect())
+            except Exception:
+                logging.getLogger(__name__).warning("关闭企业微信官方 SDK 连接失败", exc_info=True)
+        if self._loop is not None and self._thread is not None and self._thread.is_alive():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join(timeout=5)
+        if self._loop is not None and not self._loop.is_running():
+            self._loop.close()
+        self._loop = None
+        self._thread = None
 
 
 class WebSocketTransport:

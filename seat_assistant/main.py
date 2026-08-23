@@ -18,7 +18,13 @@ def build_service(
     settings.notify_reservation_results = notify_reservation_results
     settings.notify_scheduler_summary = notify_scheduler_summary
     adapter = DryRunReservation() if settings.dry_run else PlaywrightReservation(settings)
-    notifier = WeComNotifier(settings.wecom_webhook, login_url=settings.login_url)
+    notifier = WeComNotifier(
+        settings.wecom_webhook,
+        login_url=settings.login_url,
+        bot_outbox_dir=settings.wecom_bot_outbox_dir,
+        bot_user_id=settings.wecom_user_id,
+        bot_enabled=bool(settings.wecom_bot_id and settings.wecom_bot_secret),
+    )
     return settings, AssistantService(settings, Repository(settings.db_path, settings.account_id), adapter, notifier)
 
 
@@ -46,7 +52,13 @@ def build_services(
         settings.notify_reservation_results = notify_reservation_results
         settings.notify_scheduler_summary = notify_scheduler_summary
         adapter = DryRunReservation() if settings.dry_run else PlaywrightReservation(settings)
-        notifier = WeComNotifier(settings.wecom_webhook, login_url=settings.login_url)
+        notifier = WeComNotifier(
+            settings.wecom_webhook,
+            login_url=settings.login_url,
+            bot_outbox_dir=settings.wecom_bot_outbox_dir,
+            bot_user_id=settings.wecom_user_id,
+            bot_enabled=bool(settings.wecom_bot_id and settings.wecom_bot_secret),
+        )
         services.append(AssistantService(settings, Repository(settings.db_path, settings.account_id), adapter, notifier))
     return base, services
 

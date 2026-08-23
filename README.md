@@ -1,6 +1,6 @@
 # Seat Assistant
 
-当前版本：`v1.0.2`
+当前版本：`v1.0.6`
 
 本项目在 Windows 本机运行，通过 Playwright 登录河南理工大学图书馆座位系统，支持账号初始化、手动预约和无感定时预约。
 
@@ -224,14 +224,27 @@ SEAT_ACCOUNTS_FILE=accounts.json
 
 当前安装脚本默认参数：
 
-| 参数               | 默认值     | 作用            |
-| ---------------- | -------:| ------------- |
+| 参数               | 默认值     | 作用                                |
+| ---------------- | -------:| --------------------------------- |
 | `-MorningAt`     | `22:05` | 前一天开始检查次日上午预约；次日 `07:00` 另有一次补偿触发 |
-| `-AfternoonAt`   | `12:30` | 当天开始检查下午预约    |
-| `-EveningAt`     | `19:10` | 当天开始检查晚上预约    |
-| `-Period04At`    | `10:05` | 当天开始检查第4段预约   |
-| `-Period05At`    | `13:05` | 当天开始检查第5段预约   |
-| `-RepeatMinutes` | `10`    | 任务触发间隔        |
+| `-AfternoonAt`   | `12:30` | 当天开始检查下午预约                        |
+| `-EveningAt`     | `19:10` | 当天开始检查晚上预约                        |
+| `-Period04At`    | `10:05` | 当天开始检查第4段预约                       |
+| `-Period05At`    | `13:05` | 当天开始检查第5段预约                       |
+| `-RepeatMinutes` | `10`    | 任务触发间隔                            |
+
+安装脚本还会为每个预约窗口创建对应的隐藏机器人任务。机器人在预约首次触发前 1 分钟启动，在最后一次预约触发后保留 15 分钟，然后由 `--run-for-minutes` 自动退出并释放锁文件。机器人任务失败后每 1 分钟最多自动重启 5 次，并设置了唤醒电脑、联网后启动和电池运行条件。
+
+机器人任务名称包括：
+
+```text
+SeatAssistant-Bot-Morning
+SeatAssistant-Bot-Morning-Fallback
+SeatAssistant-Bot-Afternoon
+SeatAssistant-Bot-Evening
+SeatAssistant-Bot-Period04
+SeatAssistant-Bot-Period05
+```
 
 修改时间后重新安装：
 
@@ -263,6 +276,8 @@ SEAT_ACCOUNTS_FILE=accounts.json
 Get-ScheduledTask -TaskName `
   "SeatAssistant-Morning","SeatAssistant-Afternoon","SeatAssistant-Evening"
 Get-ScheduledTaskInfo -TaskName "SeatAssistant-Evening"
+Get-ScheduledTask -TaskName "SeatAssistant-Bot-Evening"
+Get-ScheduledTaskInfo -TaskName "SeatAssistant-Bot-Evening"
 ```
 
 按任务查看、修改、测试和恢复：
@@ -289,6 +304,7 @@ Get-ScheduledTaskInfo -TaskName "SeatAssistant-Period05"
 Start-ScheduledTask -TaskName "SeatAssistant-Morning"
 Start-ScheduledTask -TaskName "SeatAssistant-Afternoon"
 Start-ScheduledTask -TaskName "SeatAssistant-Evening"
+Start-ScheduledTask -TaskName "SeatAssistant-Bot-Evening"
 Start-ScheduledTask -TaskName "SeatAssistant-Period04"
 Start-ScheduledTask -TaskName "SeatAssistant-Period05"
 
@@ -304,6 +320,9 @@ Start-ScheduledTask -TaskName "SeatAssistant-Period05"
 
 # 真实提交，使用账号初始化保存的配置
 .\.venv\Scripts\python.exe -m scripts.run_scheduled_task --period evening
+
+# 单独演练机器人，启动 5 分钟后自动退出
+.\.venv\Scripts\python.exe -m scripts.run_wecom_bot --run-for-minutes 5
 ```
 
 定时任务演练会完整运行账号初始化检查、预约流程和通知流程，但结果只标记为 `dry-run`：不会提交真实预约，不写入 `reservations` 的 `reserved` 记录，也不会增加每日成功预约次数。`--dry-run` 会强制使用演练适配器，不受 `.env` 中 `SEAT_DRY_RUN=false` 影响。真实提交不要加 `--dry-run`，并确认计划任务已用不带 `-DryRun` 的命令重新安装。
@@ -344,6 +363,7 @@ SEAT_WECOM_BOT_SECRET=
 SEAT_WECOM_BOT_WS_URL=wss://openws.work.weixin.qq.com
 SEAT_WECOM_BOT_DEFAULT_USER=
 SEAT_WECOM_BOT_LOCK_FILE=logs/wecom-bot.lock
+SEAT_WECOM_BOT_OUTBOX_DIR=logs/wecom-bot-outbox
 ```
 
 `SEAT_DRY_RUN=true` 影响本地服务和相关演练配置；手动 `preview_reservation.py` 是否提交以 `--submit` 为准；静默任务是否演练以安装时的 `-DryRun` 为准。
@@ -352,13 +372,25 @@ SEAT_WECOM_BOT_LOCK_FILE=logs/wecom-bot.lock
 
 ### 5. 企业微信智能机器人长连接
 
-企业微信智能机器人长连接是独立常驻进程，不会改变现有预约服务和 Windows 定时任务。先在 `.env` 配置机器人参数：
+企业微信智能机器人长连接使用官方 `wecom-aibot-sdk`，是独立常驻进程，不会改变现有预约服务和 Windows 定时任务。先在 `.env` 配置机器人参数：
 
 ```dotenv
 SEAT_WECOM_BOT_ID=企业微信智能机器人 Bot ID
 SEAT_WECOM_BOT_SECRET=企业微信智能机器人 Secret
 SEAT_WECOM_BOT_WS_URL=wss://openws.work.weixin.qq.com
 SEAT_WECOM_BOT_LOCK_FILE=logs/wecom-bot.lock
+```
+
+项目要求 Python 3.11+，安装项目依赖时会同时安装 `wecom-aibot-sdk` 及其依赖。每个需要接收一对一消息的账号，在 `accounts.json` 中填写企业微信用户 ID：
+
+如果 `.env` 中缺少 `SEAT_WECOM_BOT_ID` 或 `SEAT_WECOM_BOT_SECRET`，机器人功能视为关闭：机器人任务正常退出，不影响预约和 Webhook 通知，也不会写入机器人投递箱。
+
+```json
+{
+  "id": "account03",
+  "wecom_user_id": "企业微信 userid",
+  "wecom_aliases": ["张三", "zs"]
+}
 ```
 
 再在 `accounts.json` 中给账号配置一对一接收人和别名：
@@ -382,7 +414,16 @@ SEAT_WECOM_BOT_LOCK_FILE=logs/wecom-bot.lock
 推文 @张三 标题 | https://example.test/a | 备注
 ```
 
-机器人会按消息 ID 去重，断线后自动退避重连，并用 `SEAT_WECOM_BOT_LOCK_FILE` 防止同一台机器重复启动。收到消息后优先使用企业微信回调提供的 `response_url` 回复当前发起人；因此在群里发送命令时，回复会回到当前群会话。跨用户主动私发需要企业微信侧提供对应的主动发送能力，不能仅依赖普通群机器人 Webhook。
+启动后，官方 SDK 负责鉴权、心跳和断线重连；项目负责消息去重、命令解析和账号路由。预约程序会同时发送 Webhook 群卡片，并按账号写入 `SEAT_WECOM_BOT_OUTBOX_DIR` 投递箱；运行中的机器人自动读取投递箱，通过 SDK 的 `send_message(chatid=user_id, ...)` 把同一张卡片发给对应账号，成功后删除投递文件。两条命令之间不依赖 Webhook 群消息回流。
+
+验证方式：
+
+```powershell
+\.venv\Scripts\python.exe -m pytest tests/test_wecom_sdk_dependency.py tests/test_wecom_official_sdk_adapter.py tests/test_wecom_bot.py tests/test_wecom_bot_send.py -q
+\.venv\Scripts\python.exe -m scripts.run_wecom_bot
+```
+
+第一条命令只做本地验证，不会连接企业微信。第二条命令需要已配置真实 Bot ID、Secret，并保持进程运行；在企业微信中发送 `推文 account03 标题 | https://example.test/a`，机器人应向 `account03` 对应的 `wecom_user_id` 发送一条 Markdown 消息。停止服务使用 `Ctrl+C`。不要把 `.env` 或 `accounts.json` 内容发到日志或聊天中。
 
 ## 常用辅助命令
 

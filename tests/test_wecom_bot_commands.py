@@ -21,6 +21,12 @@ def test_parse_push_tweet_command_accepts_at_target_and_note():
     assert command.note == "备注"
 
 
+def test_parse_push_tweet_command_unwraps_markdown_link():
+    command = parse_command("推文 account03 标题 | [https://example.test/a](https://example.test/a)")
+
+    assert command.url == "https://example.test/a"
+
+
 def test_parse_push_tweet_command_requires_title_and_url():
     assert parse_command("推文 account03 标题").kind == "help"
     assert parse_command("推文").kind == "help"

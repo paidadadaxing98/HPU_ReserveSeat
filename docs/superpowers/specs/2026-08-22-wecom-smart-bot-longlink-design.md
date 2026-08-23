@@ -4,8 +4,8 @@
 
 ## 范围
 
-- 使用企业微信智能机器人 API 模式的 WebSocket 长连接。
-- 支持 `Bot ID + Secret` 鉴权、心跳保活、断线重连和指数退避。
+- 使用 `wecom-aibot-sdk` 官方 Python SDK 的 WebSocket 长连接。
+- 支持 `Bot ID + Secret` 鉴权；连接、心跳、断线重连和指数退避由 SDK 管理。
 - 支持消息去重，避免重连或重复投递导致同一条命令被执行多次。
 - 支持命令路由，把不同文本消息分发到不同处理器。
 - 支持单实例保护，避免同一台机器上同时跑两个机器人进程。
@@ -52,21 +52,21 @@
 ```text
 scripts.run_wecom_bot
     -> WeComBotRunner
-    -> WebSocket transport
+    -> Official SDK adapter
     -> MessageDeduplicator
     -> CommandRouter
     -> WeComPushService
     -> account resolver / sender
 ```
 
-`WeComBotRunner` 只负责循环、重连和退出控制。命令解析与业务处理都放在独立组件里，方便测试和替换传输层。
+`WeComBotRunner` 负责启动和停止异步 SDK 客户端；连接、心跳和重连交给 SDK。`OfficialSdkTransport` 负责将 SDK 的异步事件帧转换成项目内部的 `WeComBotMessage`，并把同步业务路由桥接到异步的回复和主动发送 API。命令解析与业务处理继续放在独立组件里，方便测试。
 
 ## 安全边界
 
 - 机器人进程只允许一个实例运行。
-- 重连后继续使用同一套业务路由，但不会重复处理已见过的消息 ID。
+- SDK 重连后继续使用同一套业务路由，但不会重复处理已见过的消息 ID。
 - 发送失败不会中断接收循环。
-- 当前消息优先通过回调 `response_url` 回复发起人；跨用户主动推送需要企业微信侧开放对应发送能力。
+- 当前消息优先通过 SDK 的 `reply` 回复发起人；跨用户主动推送通过 SDK 的 `send_message(chatid=user_id, ...)` 完成。
 - 未配置 `Bot ID` 或 `Secret` 时，机器人直接退出，不影响预约功能。
 - 现有 webhook 通知继续保留，不和长连接共用实现。
 
@@ -78,3 +78,4 @@ scripts.run_wecom_bot
 - 重连测试覆盖异常断开、退避延迟和恢复后继续收消息。
 - 单实例测试覆盖锁文件已占用时安全退出。
 - 一对一发送测试覆盖 payload 渲染和发送失败回退。
+- SDK 适配测试覆盖文本事件帧转换、当前消息回复、指定用户主动发送和缺失 SDK 时的明确错误。

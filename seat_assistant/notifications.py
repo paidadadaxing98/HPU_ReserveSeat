@@ -2,6 +2,7 @@ import json
 import logging
 from datetime import date, datetime
 from pathlib import Path
+import uuid
 from urllib.request import Request, urlopen
 
 
@@ -165,6 +166,25 @@ def render_tweet_push(account_id: str, user_name: str, title: str, url: str, not
     return "\n".join(lines)
 
 
+def render_tweet_card(account_id: str, user_name: str, title: str, url: str, note: str | None = None) -> dict:
+    fields = [
+        {"keyname": "账号", "value": account_id},
+        {"keyname": "标题", "value": title},
+        {"keyname": "接收人", "value": user_name},
+    ]
+    if note:
+        fields.append({"keyname": "备注", "value": note})
+    return {
+        "msgtype": "template_card",
+        "template_card": {
+            "card_type": "text_notice",
+            "main_title": {"title": "推文转发", "desc": title},
+            "horizontal_content_list": fields,
+            "card_action": {"type": 1, "url": url},
+        },
+    }
+
+
 def _text_card(title: str, text: str, login_url: str = _LOGIN_URL) -> dict:
     return {
         "msgtype": "template_card",
@@ -207,26 +227,57 @@ def reservation_card(day: str, period: str, result, start: str, end: str, accoun
 
 
 class WeComNotifier:
-    def __init__(self, webhook: str = "", outbox_path: str | Path = "logs/wecom-webhook-outbox.jsonl", login_url: str = _LOGIN_URL):
+    def __init__(
+        self,
+        webhook: str = "",
+        outbox_path: str | Path = "logs/wecom-webhook-outbox.jsonl",
+        login_url: str = _LOGIN_URL,
+        bot_outbox_dir: str | Path = "logs/wecom-bot-outbox",
+        bot_user_id: str = "",
+        bot_enabled: bool = True,
+    ):
         self.webhook = webhook
         self.outbox_path = Path(outbox_path)
         self.login_url = _LOGIN_URL
+        self.bot_outbox_dir = Path(bot_outbox_dir)
+        self.bot_user_id = bot_user_id.strip()
+        self.bot_enabled = bot_enabled
 
     def send(self, text: str) -> bool:
         return self.send_template_card(_text_card("座位助手通知", text, self.login_url))
 
     def send_template_card(self, card: dict) -> bool:
-        if not self.webhook:
+        webhook_ok = True
+        if self.webhook:
+            pending = self._read_outbox()
+            pending.append({"payload": card, "queued_at": datetime.now().isoformat(timespec="seconds")})
+            remaining = []
+            for item in pending:
+                payload = item.get("payload") or _text_card("座位助手通知", str(item.get("text") or ""))
+                if not self._post(payload):
+                    remaining.append(item)
+            self._write_outbox(remaining)
+            webhook_ok = not remaining
+        else:
+            webhook_ok = False
+
+        bot_ok = self._queue_bot_card(card)
+        return webhook_ok or bot_ok
+
+    def _queue_bot_card(self, card: dict) -> bool:
+        if not self.bot_enabled or not self.bot_user_id:
             return False
-        pending = self._read_outbox()
-        pending.append({"payload": card, "queued_at": datetime.now().isoformat(timespec="seconds")})
-        remaining = []
-        for item in pending:
-            payload = item.get("payload") or _text_card("座位助手通知", str(item.get("text") or ""))
-            if not self._post(payload):
-                remaining.append(item)
-        self._write_outbox(remaining)
-        return not remaining
+        self.bot_outbox_dir.mkdir(parents=True, exist_ok=True)
+        path = self.bot_outbox_dir / f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}-{uuid.uuid4().hex}.json"
+        payload = {
+            "user_id": self.bot_user_id,
+            "payload": card,
+            "queued_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(path)
+        return True
 
     def _post(self, payload: dict) -> bool:
         body = json.dumps(payload, ensure_ascii=False).encode()

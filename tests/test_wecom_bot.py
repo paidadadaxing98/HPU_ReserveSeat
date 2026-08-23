@@ -1,4 +1,6 @@
 from pathlib import Path
+import threading
+import time
 
 from seat_assistant.commands import Command
 from seat_assistant.config import AccountSettings
@@ -128,6 +130,50 @@ def test_router_replies_with_tweet_to_sender_response_url(tmp_path):
     ]
 
 
+def test_router_sends_one_template_card_when_target_is_sender(tmp_path):
+    accounts = [
+        AccountSettings(
+            id="account01",
+            account="1001",
+            password="secret",
+            profile_path=tmp_path / "profile",
+            db_path=tmp_path / "db.sqlite",
+            wecom_user_id="user-a",
+            wecom_aliases=("老大",),
+        )
+    ]
+    cards = []
+    replies = []
+
+    class Transport:
+        def send_to_user(self, user_id, text):
+            raise AssertionError("不应发送第二条主动文本消息")
+
+        def send_template_card(self, user_id, card):
+            cards.append((user_id, card))
+            return True
+
+        def reply_template_card(self, message, card):
+            replies.append((message.message_id, card))
+            return True
+
+        def reply(self, message, text):
+            replies.append((message.message_id, text))
+            return True
+
+    router = WeComCommandRouter(AccountRecipientResolver(accounts), None, None)
+    message = WeComBotMessage(
+        "msg-3", "req-3", "user-a", "推文 老大 标题 | https://example.test/a",
+        response_url="https://example.test/reply",
+    )
+
+    assert router.handle(message, Transport()) is True
+    assert cards == []
+    assert len(replies) == 1
+    assert replies[0][0] == "msg-3"
+    assert replies[0][1]["template_card"]["card_type"] == "text_notice"
+
+
 def test_router_replies_when_push_target_is_unknown(tmp_path):
     router = WeComCommandRouter(
         AccountRecipientResolver([]),
@@ -175,3 +221,38 @@ def test_runner_skips_duplicate_messages_and_continues_after_disconnect():
 
     assert handled == ["msg-1", "msg-2"]
     assert runner.reconnect_delays == [1.0]
+
+
+def test_runner_stop_interrupts_a_blocking_transport():
+    class BlockingTransport:
+        def __init__(self):
+            self.interrupted = threading.Event()
+
+        def connect(self, bot_id, secret):
+            pass
+
+        def iter_messages(self):
+            while not self.interrupted.is_set():
+                time.sleep(0.01)
+            return
+            yield
+
+        def interrupt(self):
+            self.interrupted.set()
+
+    transport = BlockingTransport()
+    runner = WeComBotRunner(
+        bot_id="bot",
+        secret="secret",
+        transport_factory=lambda: transport,
+        sleep=lambda seconds: None,
+    )
+    worker = threading.Thread(target=runner.run)
+
+    worker.start()
+    time.sleep(0.03)
+    runner.stop()
+    worker.join(timeout=1)
+
+    assert transport.interrupted.is_set()
+    assert not worker.is_alive()
