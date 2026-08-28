@@ -83,8 +83,9 @@ def run_once(
             continue
         if status == "uncertain":
             results[name] = _period_summary("uncertain", record.get("message") or "预约结果不明确")
-            blocking_status = "uncertain"
-            break
+            # An uncertain result only prevents retrying this period. It must
+            # not prevent independent later periods from being attempted.
+            continue
         if status == "failed":
             results[name] = _period_summary("failed", record.get("message") or "预约失败")
             continue

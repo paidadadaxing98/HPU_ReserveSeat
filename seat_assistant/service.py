@@ -62,7 +62,9 @@ class AssistantService:
             record_period, status, _, _, room, seat = record
             if record_period != period_name and status in {"reserved", "uncertain"}:
                 if status == "uncertain":
-                    return SeatResult(False, room, seat, "同一天已有一次预约，但上次结果不明确；已停止重试", conclusive=False)
+                    # Uncertainty is scoped to the same period. A later period
+                    # may still be booked because no confirmed overlap exists.
+                    continue
                 if not _reservation_has_ended(day, record[3], now):
                     return SeatResult(False, room, seat, "前一个预约尚未结束，当前账号暂不能预约下一时段", conclusive=True)
         if self.repo.successful_booking_count(quota_day) >= self.settings.daily_success_limit:
@@ -89,6 +91,103 @@ class AssistantService:
             account_label = (self.settings.wecom_aliases[0] if getattr(self.settings, "wecom_aliases", ()) else self.account_id)
             send_reservation_notification(self.notifier, day, period_name, result, start, end, account_label)
         return result
+
+    def dynamic_reschedule_period(
+        self,
+        day: str,
+        period_name: str,
+        now: datetime,
+        operation_key: str,
+        quota_day: str | None = None,
+    ) -> SeatResult:
+        """Cancel the current booking and replace it with a current-time booking."""
+        quota_day = quota_day or day
+        record = self.repo.get_reservation(day, period_name)
+        cancelled = self._cancel_dynamic_reservation(day, period_name, operation_key)
+        if not cancelled.success:
+            return cancelled
+        start = "现在"
+        end = _current_reservation_end(now, record.get("end") if record else None)
+        try:
+            result = self.adapter.reserve(day, period_name, start, end)
+        except Exception as exc:
+            result = SeatResult(False, message=f"动态预约适配器异常：{exc}", conclusive=False)
+        status = "reserved" if result.success else "uncertain" if not result.conclusive else "failed"
+        self.repo.save_reservation(
+            day,
+            period_name,
+            status,
+            start,
+            end,
+            result.room,
+            result.seat,
+            result.message or ("动态预约成功" if result.success else "动态预约失败"),
+        )
+        if result.success:
+            self.repo.record_successful_booking(quota_day, f"{period_name}:dynamic:{operation_key}")
+        self._notify_dynamic_result(day, period_name, result, start, end)
+        return result
+
+    def dynamic_cancel_period(
+        self,
+        day: str,
+        period_name: str,
+        operation_key: str,
+        reason: str,
+    ) -> SeatResult:
+        """Cancel an unentered booking at the hard dynamic-window cutoff."""
+        result = self._cancel_dynamic_reservation(day, period_name, operation_key)
+        if result.success:
+            record = self.repo.get_reservation(day, period_name)
+            self.repo.save_reservation(
+                day,
+                period_name,
+                "cancelled",
+                record["start"] if record else "",
+                record["end"] if record else "",
+                record["room"] if record else "",
+                record["seat"] if record else "",
+                reason,
+            )
+        return result
+
+    def _cancel_dynamic_reservation(self, day: str, period_name: str, operation_key: str) -> SeatResult:
+        record = self.repo.get_reservation(day, period_name)
+        if not record or record["status"] != "reserved":
+            return SeatResult(False, message="当前没有可取消的有效预约", conclusive=True)
+        if self.repo.has_dynamic_cancellation(day, operation_key):
+            return SeatResult(True, record["room"], record["seat"], "动态取消操作已处理")
+        if self.repo.dynamic_cancellation_count(day) >= self.settings.max_cancel_per_day:
+            return SeatResult(False, message=f"账号今日动态取消次数已达到 {self.settings.max_cancel_per_day} 次", conclusive=True)
+        try:
+            result = self.adapter.cancel(day, period_name)
+        except Exception as exc:
+            result = SeatResult(False, message=f"动态取消适配器异常：{exc}", conclusive=False)
+        if not result.success:
+            return result
+        if not self.repo.record_dynamic_cancellation(day, operation_key):
+            return SeatResult(True, record["room"], record["seat"], "动态取消操作已处理")
+        self.repo.save_reservation(
+            day,
+            period_name,
+            "cancelled",
+            record["start"],
+            record["end"],
+            record["room"],
+            record["seat"],
+            "动态补偿已取消原预约",
+        )
+        return SeatResult(True, record["room"], record["seat"], "动态取消成功")
+
+    def _notify_dynamic_result(self, day: str, period_name: str, result: SeatResult, start: str, end: str) -> None:
+        if not getattr(self.settings, "notify_reservation_results", True):
+            return
+        account_label = (
+            self.settings.wecom_aliases[0]
+            if getattr(self.settings, "wecom_aliases", ())
+            else self.account_id
+        )
+        send_reservation_notification(self.notifier, day, period_name, result, start, end, account_label)
 
     def _live_reservation_block(self, day: str, period_name: str, now: datetime) -> SeatResult | None:
         query = getattr(self.adapter, "current_reservations", None)
@@ -194,3 +293,14 @@ def _reservation_has_ended(day: str, end: str, now: datetime) -> bool:
 
 def _format_minutes(value: int) -> str:
     return f"{value // 60:02d}:{value % 60:02d}"
+
+
+def _current_reservation_end(now: datetime, latest_end: str | None = None) -> str:
+    total_minutes = now.hour * 60 + now.minute + 240
+    rounded = (total_minutes // 30) * 30
+    if latest_end:
+        try:
+            rounded = min(rounded, _clock_minutes(parse_hhmm(latest_end)))
+        except (TypeError, ValueError):
+            pass
+    return f"{rounded // 60:02d}:{rounded % 60:02d}"

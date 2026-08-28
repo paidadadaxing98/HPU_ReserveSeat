@@ -13,3 +13,4 @@ __pycache__/
 .pytest_cache/
 .pytest-tmp/
 logs/
+.burp-parser-src/

@@ -61,7 +61,21 @@ class Settings:
     notify_scheduler_summary: bool = False
     login_url: str = "https://seatlib.hpu.edu.cn/libseat/"
     max_reservations_per_run: int = 1
-    daily_success_limit: int = 5
+    daily_success_limit: int = 15
+    max_cancel_per_day: int = 15
+    dynamic_compensation_enabled: bool = True
+    dynamic_before_minutes: int = 30
+    dynamic_after_minutes: int = 90
+    dynamic_boundary_lead_minutes: int = 2
+    dynamic_normal_poll_seconds: int = 180
+    dynamic_boundary_poll_seconds: int = 120
+    dynamic_late_reschedule_minutes: int = 30
+    dynamic_max_periods: int = 3
+    dynamic_reconnect_base_seconds: int = 10
+    dynamic_reconnect_max_seconds: int = 300
+    dynamic_reconnect_max_attempts: int = 5
+    dynamic_manual_login_timeout_seconds: int = 300
+    access_records_url: str = ""
     account_interval_seconds: float = 15.0
     captcha_llm_enabled: bool = False
     captcha_llm_api_key: str = ""
@@ -70,6 +84,7 @@ class Settings:
     captcha_llm_timeout_seconds: float = 15.0
     captcha_llm_max_attempts: int = 2
     profile_path: str = ".browser-profile"
+    monitor_profile_path: str = ""
     periods: dict[str, Period] = field(default_factory=_default_periods)
     preferred_seats: tuple[str, ...] = ()
     seat_preference: dict = field(default_factory=dict)
@@ -82,8 +97,30 @@ class Settings:
             raise ValueError("control_token cannot be blank")
         if self.max_reservations_per_run != 1:
             raise ValueError("max_reservations_per_run 只能为 1")
-        if not 1 <= self.daily_success_limit <= 5:
-            raise ValueError("daily_success_limit 必须在 1 到 5 之间")
+        if not 1 <= self.daily_success_limit <= 15:
+            raise ValueError("daily_success_limit 必须在 1 到 15 之间")
+        if not 1 <= self.max_cancel_per_day <= 15:
+            raise ValueError("max_cancel_per_day 必须在 1 到 15 之间")
+        if self.dynamic_before_minutes < 0 or self.dynamic_after_minutes < 0:
+            raise ValueError("动态补偿窗口范围不能小于 0")
+        if self.dynamic_boundary_lead_minutes < 0:
+            raise ValueError("动态边界提前检查时间不能小于 0")
+        if self.dynamic_normal_poll_seconds <= 0 or self.dynamic_boundary_poll_seconds <= 0:
+            raise ValueError("动态轮询间隔必须大于 0")
+        if self.dynamic_late_reschedule_minutes <= 0:
+            raise ValueError("动态迟到重约间隔必须大于 0")
+        if not 1 <= self.dynamic_max_periods <= 3:
+            raise ValueError("dynamic_max_periods 必须在 1 到 3 之间")
+        if self.dynamic_reconnect_base_seconds <= 0:
+            raise ValueError("动态会话重建基础等待时间必须大于 0")
+        if self.dynamic_reconnect_max_seconds < self.dynamic_reconnect_base_seconds:
+            raise ValueError("动态会话重建最大等待时间不能小于基础等待时间")
+        if self.dynamic_reconnect_max_attempts <= 0:
+            raise ValueError("动态会话重建最大次数必须大于 0")
+        if self.dynamic_manual_login_timeout_seconds < 0:
+            raise ValueError("动态会话人工登录等待时间不能小于 0")
+        if self.access_records_url and not self.access_records_url.startswith(("http://", "https://")):
+            raise ValueError("门禁记录接口地址必须是 http:// 或 https:// 地址")
         if self.account_interval_seconds < 0:
             raise ValueError("account_interval_seconds 不能小于 0")
         if not self.captcha_llm_base_url.startswith(("http://", "https://")):
@@ -399,7 +436,21 @@ def load_settings() -> Settings:
         wecom_bot_outbox_dir=os.getenv("SEAT_WECOM_BOT_OUTBOX_DIR", "logs/wecom-bot-outbox").strip(),
         login_url=os.getenv("SEAT_LOGIN_URL", "https://seatlib.hpu.edu.cn/libseat/"),
         max_reservations_per_run=int(os.getenv("SEAT_MAX_RESERVATIONS_PER_RUN", "1")),
-        daily_success_limit=int(os.getenv("SEAT_DAILY_SUCCESS_LIMIT", "5")),
+        daily_success_limit=int(os.getenv("SEAT_DAILY_SUCCESS_LIMIT", "15")),
+        max_cancel_per_day=int(os.getenv("SEAT_MAX_CANCEL_PER_DAY", "15")),
+        dynamic_compensation_enabled=os.getenv("SEAT_DYNAMIC_COMPENSATION_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
+        dynamic_before_minutes=int(os.getenv("SEAT_DYNAMIC_BEFORE_MINUTES", "30")),
+        dynamic_after_minutes=int(os.getenv("SEAT_DYNAMIC_AFTER_MINUTES", "90")),
+        dynamic_boundary_lead_minutes=int(os.getenv("SEAT_DYNAMIC_BOUNDARY_LEAD_MINUTES", "2")),
+        dynamic_normal_poll_seconds=int(os.getenv("SEAT_DYNAMIC_NORMAL_POLL_SECONDS", "180")),
+        dynamic_boundary_poll_seconds=int(os.getenv("SEAT_DYNAMIC_BOUNDARY_POLL_SECONDS", "120")),
+        dynamic_late_reschedule_minutes=int(os.getenv("SEAT_DYNAMIC_LATE_RESCHEDULE_MINUTES", "30")),
+        dynamic_max_periods=int(os.getenv("SEAT_DYNAMIC_MAX_PERIODS", "3")),
+        dynamic_reconnect_base_seconds=int(os.getenv("SEAT_DYNAMIC_RECONNECT_BASE_SECONDS", "10")),
+        dynamic_reconnect_max_seconds=int(os.getenv("SEAT_DYNAMIC_RECONNECT_MAX_SECONDS", "300")),
+        dynamic_reconnect_max_attempts=int(os.getenv("SEAT_DYNAMIC_RECONNECT_MAX_ATTEMPTS", "5")),
+        dynamic_manual_login_timeout_seconds=int(os.getenv("SEAT_DYNAMIC_MANUAL_LOGIN_TIMEOUT_SECONDS", "300")),
+        access_records_url=os.getenv("SEAT_ACCESS_RECORDS_URL", "").strip(),
         account_interval_seconds=float(os.getenv("SEAT_ACCOUNT_INTERVAL_SECONDS", "15")),
         captcha_llm_enabled=os.getenv("SEAT_CAPTCHA_LLM_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
         captcha_llm_api_key=os.getenv("SEAT_CAPTCHA_LLM_API_KEY", "").strip(),
@@ -442,6 +493,20 @@ def load_account_settings(account_id: str | None = None) -> Settings:
         login_url=selected.login_url,
         max_reservations_per_run=base.max_reservations_per_run,
         daily_success_limit=base.daily_success_limit,
+        max_cancel_per_day=base.max_cancel_per_day,
+        dynamic_compensation_enabled=base.dynamic_compensation_enabled,
+        dynamic_before_minutes=base.dynamic_before_minutes,
+        dynamic_after_minutes=base.dynamic_after_minutes,
+        dynamic_boundary_lead_minutes=base.dynamic_boundary_lead_minutes,
+        dynamic_normal_poll_seconds=base.dynamic_normal_poll_seconds,
+        dynamic_boundary_poll_seconds=base.dynamic_boundary_poll_seconds,
+        dynamic_late_reschedule_minutes=base.dynamic_late_reschedule_minutes,
+        dynamic_max_periods=base.dynamic_max_periods,
+        dynamic_reconnect_base_seconds=base.dynamic_reconnect_base_seconds,
+        dynamic_reconnect_max_seconds=base.dynamic_reconnect_max_seconds,
+        dynamic_reconnect_max_attempts=base.dynamic_reconnect_max_attempts,
+        dynamic_manual_login_timeout_seconds=base.dynamic_manual_login_timeout_seconds,
+        access_records_url=base.access_records_url,
         account_interval_seconds=base.account_interval_seconds,
         captcha_llm_enabled=base.captcha_llm_enabled,
         captcha_llm_api_key=base.captcha_llm_api_key,
@@ -450,6 +515,7 @@ def load_account_settings(account_id: str | None = None) -> Settings:
         captcha_llm_timeout_seconds=base.captcha_llm_timeout_seconds,
         captcha_llm_max_attempts=base.captcha_llm_max_attempts,
         profile_path=str(selected.profile_path),
+        monitor_profile_path=str(selected.profile_path.parent / "monitor-profile"),
         periods=_copy_periods(selected.periods),
         preferred_seats=selected.preferred_seats,
         seat_preference=dict(selected.seat_preference),

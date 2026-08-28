@@ -17,6 +17,19 @@ class Repository:
         self.db.execute("CREATE TABLE IF NOT EXISTS scheduler_runs (date TEXT PRIMARY KEY, status TEXT NOT NULL, summary TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
         self.db.execute("CREATE TABLE IF NOT EXISTS successful_bookings (date TEXT NOT NULL, account_id TEXT NOT NULL, reservation_key TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(date, account_id, reservation_key))")
         self.db.execute(
+            "CREATE TABLE IF NOT EXISTS dynamic_sessions ("
+            "date TEXT NOT NULL, period TEXT NOT NULL, anchor_start TEXT NOT NULL, anchor_end TEXT NOT NULL, "
+            "window_start TEXT NOT NULL, window_end TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'monitoring', "
+            "action_index INTEGER NOT NULL DEFAULT 0, entered_at TEXT, cancel_count INTEGER NOT NULL DEFAULT 0, "
+            "last_action_at TEXT, last_checked_at TEXT, message TEXT NOT NULL DEFAULT '', "
+            "PRIMARY KEY(date, period))"
+        )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS dynamic_cancellations ("
+            "date TEXT NOT NULL, account_id TEXT NOT NULL, operation_key TEXT NOT NULL, "
+            "created_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(date, account_id, operation_key))"
+        )
+        self.db.execute(
             "CREATE TABLE IF NOT EXISTS room_round_robin ("
             "account_id TEXT NOT NULL, library TEXT NOT NULL, floor TEXT NOT NULL, "
             "next_index INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(account_id, library, floor)"
@@ -42,7 +55,7 @@ class Repository:
         self.db.commit()
 
     def samples(self, period: str) -> list[str]:
-        rows = self.db.execute("SELECT value FROM events WHERE kind IN ('arrival', 'delay') AND period=?", (period,)).fetchall()
+        rows = self.db.execute("SELECT value FROM events WHERE kind='arrival' AND period=?", (period,)).fetchall()
         return [row[0] for row in rows]
 
     def events(self, kind: str | None = None, period: str | None = None) -> list[str]:
@@ -133,6 +146,101 @@ class Repository:
         ).fetchone()
         return int(row[0])
 
+    def save_dynamic_session(
+        self,
+        date: str,
+        period: str,
+        anchor_start: str,
+        anchor_end: str,
+        window_start: str,
+        window_end: str,
+        status: str = "monitoring",
+        action_index: int = 0,
+        entered_at: str | None = None,
+        cancel_count: int = 0,
+        last_action_at: str | None = None,
+        last_checked_at: str | None = None,
+        message: str = "",
+    ):
+        self.db.execute(
+            "REPLACE INTO dynamic_sessions("
+            "date, period, anchor_start, anchor_end, window_start, window_end, status, action_index, "
+            "entered_at, cancel_count, last_action_at, last_checked_at, message"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                date, period, anchor_start, anchor_end, window_start, window_end, status, int(action_index),
+                entered_at, int(cancel_count), last_action_at, last_checked_at, message,
+            ),
+        )
+        self.db.commit()
+
+    def get_dynamic_session(self, date: str, period: str):
+        row = self.db.execute(
+            "SELECT date, period, anchor_start, anchor_end, window_start, window_end, status, action_index, "
+            "entered_at, cancel_count, last_action_at, last_checked_at, message "
+            "FROM dynamic_sessions WHERE date=? AND period=?",
+            (date, period),
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(zip((
+            "date", "period", "anchor_start", "anchor_end", "window_start", "window_end", "status",
+            "action_index", "entered_at", "cancel_count", "last_action_at", "last_checked_at", "message",
+        ), row))
+
+    def dynamic_sessions(self, date: str) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT date, period, anchor_start, anchor_end, window_start, window_end, status, action_index, "
+            "entered_at, cancel_count, last_action_at, last_checked_at, message "
+            "FROM dynamic_sessions WHERE date=? ORDER BY period",
+            (date,),
+        ).fetchall()
+        keys = (
+            "date", "period", "anchor_start", "anchor_end", "window_start", "window_end", "status",
+            "action_index", "entered_at", "cancel_count", "last_action_at", "last_checked_at", "message",
+        )
+        return [dict(zip(keys, row)) for row in rows]
+
+    def update_dynamic_session(self, date: str, period: str, **fields):
+        allowed = {
+            "status", "action_index", "entered_at", "cancel_count", "last_action_at", "last_checked_at", "message",
+        }
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"不支持的动态会话字段：{', '.join(sorted(unknown))}")
+        if not fields:
+            return
+        assignments = ", ".join(f"{key}=?" for key in fields)
+        values = [int(value) if key in {"action_index", "cancel_count"} else value for key, value in fields.items()]
+        values.extend((date, period))
+        self.db.execute(
+            f"UPDATE dynamic_sessions SET {assignments} WHERE date=? AND period=?",
+            values,
+        )
+        self.db.commit()
+
+    def record_dynamic_cancellation(self, date: str, operation_key: str) -> bool:
+        cursor = self.db.execute(
+            "INSERT OR IGNORE INTO dynamic_cancellations(date, account_id, operation_key) VALUES (?, ?, ?)",
+            (date, self.account_id, operation_key),
+        )
+        self.db.commit()
+        return cursor.rowcount == 1
+
+    def has_dynamic_cancellation(self, date: str, operation_key: str) -> bool:
+        row = self.db.execute(
+            "SELECT 1 FROM dynamic_cancellations WHERE date=? AND account_id=? AND operation_key=?",
+            (date, self.account_id, operation_key),
+        ).fetchone()
+        return row is not None
+
+    def dynamic_cancellation_count(self, date: str) -> int:
+        row = self.db.execute(
+            "SELECT COUNT(*) FROM dynamic_cancellations WHERE date=? AND account_id=?",
+            (date, self.account_id),
+        ).fetchone()
+        return int(row[0])
+
     def reset_day(self, date: str) -> dict[str, int]:
         """Clear local booking execution state for one account and date."""
         reservations = self.db.execute(
@@ -145,6 +253,11 @@ class Repository:
         scheduler_runs = self.db.execute(
             "DELETE FROM scheduler_runs WHERE date=?", (date,)
         ).rowcount
+        self.db.execute("DELETE FROM dynamic_sessions WHERE date=?", (date,))
+        self.db.execute(
+            "DELETE FROM dynamic_cancellations WHERE date=? AND account_id=?",
+            (date, self.account_id),
+        )
         self.db.commit()
         return {
             "reservations": reservations,

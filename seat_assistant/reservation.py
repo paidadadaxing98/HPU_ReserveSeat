@@ -24,10 +24,11 @@ class DryRunReservation:
 
 class PlaywrightReservation:
     """Synchronous service boundary for the existing Playwright booking flow."""
-    def __init__(self, settings=None, runner=None, current_runner=None):
+    def __init__(self, settings=None, runner=None, current_runner=None, cancel_runner=None):
         self.settings = settings
         self.runner = runner or _default_booking_runner if settings is not None else runner
         self.current_runner = current_runner or _default_current_reservation_runner if settings is not None else current_runner
+        self.cancel_runner = cancel_runner or _default_cancel_runner if settings is not None else cancel_runner
 
     def reserve(self, date, period, start, end) -> SeatResult:
         if self.settings is None and self.runner is None:
@@ -41,7 +42,15 @@ class PlaywrightReservation:
             return SeatResult(False, message=f"真实预约流程异常：{exc}", conclusive=False)
 
     def cancel(self, date, period) -> SeatResult:
-        return SeatResult(False, message="真实网站适配器尚未校准，请先运行站点校准", conclusive=False)
+        if self.settings is None and self.cancel_runner is None:
+            return SeatResult(False, message="真实网站适配器缺少账号配置，已安全停止", conclusive=False)
+        if self.cancel_runner is None:
+            return SeatResult(False, message="真实取消流程尚未配置，已安全停止", conclusive=False)
+        try:
+            result = asyncio.run(self.cancel_runner(self.settings, date, period))
+            return result if isinstance(result, SeatResult) else SeatResult(False, message="真实取消流程未返回有效结果", conclusive=False)
+        except Exception as exc:
+            return SeatResult(False, message=f"真实取消流程异常：{exc}", conclusive=False)
 
     def current_reservations(self, day) -> list[dict]:
         if self.settings is None and self.current_runner is None:
@@ -64,3 +73,9 @@ async def _default_current_reservation_runner(settings, day):
     from scripts.preview_reservation import fetch_scheduled_current_reservations
 
     return await fetch_scheduled_current_reservations(settings, day)
+
+
+async def _default_cancel_runner(settings, day, period):
+    from scripts.preview_reservation import cancel_scheduled_reservation
+
+    return await cancel_scheduled_reservation(settings, day, period)

@@ -29,7 +29,7 @@ from seat_assistant.preview import choose_room_for_preference, layout_from_respo
 from seat_assistant.reservation import SeatResult
 from seat_assistant.seat_inventory import seats_from_layout
 from seat_assistant.storage import Repository
-from seat_assistant.submission import active_reservations_for_day, blocking_active_reservations_for_day, confirmation_required, day_reservations, end_time_response_matches_start, find_matching_reservation, find_reservation_by_day_and_time, find_similar_reservation, history_page_records, local_reservation_blocks_retry, normalize_time_option, requested_times_available, reservation_matches, submission_settled, time_option_id, time_values, validate_half_hour_time
+from seat_assistant.submission import active_reservations_for_day, blocking_active_reservations_for_day, blocking_cancelable_reservations_for_day, confirmation_required, day_reservations, end_time_response_matches_start, find_matching_reservation, find_reservation_by_day_and_end, find_reservation_by_day_and_time, find_similar_reservation, history_page_records, local_reservation_blocks_retry, normalize_time_option, requested_times_available, reservation_matches, submission_settled, time_option_id, time_values, validate_half_hour_time
 
 SITE_URL = os.getenv("SEAT_LOGIN_URL", "https://seatlib.hpu.edu.cn/libseat/")
 CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
@@ -505,6 +505,85 @@ async def fetch_scheduled_current_reservations(settings, day: str) -> list[dict]
         return day_reservations(records, day)
 
 
+async def cancel_scheduled_reservation(settings, day: str, period: str) -> SeatResult:
+    """Cancel the only active reservation for the day and verify it is gone."""
+    account_settings = settings
+    profile = Path(account_settings.profile_path)
+    async with LockedBrowser(profile, headless=True) as context:
+        page = context.pages[0] if context.pages else await context.new_page()
+        api_auth = {"headers": {}, "token": ""}
+        capture_tasks = set()
+
+        def capture_request(request):
+            task = asyncio.create_task(capture_page_request(api_auth, request))
+            capture_tasks.add(task)
+            task.add_done_callback(capture_tasks.discard)
+
+        page.on("request", capture_request)
+        await page.goto(account_settings.login_url, wait_until="domcontentloaded")
+        logged_in = await login_if_configured(page, account_settings)
+        if not logged_in and not is_seat_app_url(page.url):
+            raise RuntimeError("未能自动登录，无法取消当前预约")
+        await wait_for_authenticated_page(page, timeout_ms=30000)
+        records = await fetch_user_reservations(page, api_auth)
+        active = blocking_cancelable_reservations_for_day(records, day, datetime.now())
+        if not active:
+            return SeatResult(True, message="当前预约已不存在，无需重复取消")
+        if len(active) != 1:
+            return SeatResult(False, message="当天存在多个有效预约，无法安全确定要取消的记录", conclusive=False)
+        target = active[0]
+        try:
+            navigation = page.get_by_text("我的预约", exact=True).last
+            if await navigation.count():
+                await navigation.click()
+                await page.wait_for_timeout(500)
+        except Exception:
+            pass
+        if not await _click_cancel_for_record(page, target):
+            return SeatResult(False, message=f"未找到{period}预约的取消按钮，已停止", conclusive=False)
+        await _confirm_cancel_dialog(page)
+        deadline = asyncio.get_running_loop().time() + 15
+        while asyncio.get_running_loop().time() < deadline:
+            current = await fetch_current_reservations(page, await wait_for_api_auth(page, api_auth))
+            if not blocking_cancelable_reservations_for_day(current, day, datetime.now()):
+                return SeatResult(True, message="取消成功")
+            await page.wait_for_timeout(1000)
+        return SeatResult(False, message="取消后仍能读取到有效预约，结果不明确", conclusive=False)
+
+
+async def _click_cancel_for_record(page, record: dict) -> bool:
+    start = str(record.get("begin") or record.get("beginTime") or record.get("startTime") or "").strip()
+    end = str(record.get("end") or record.get("endTime") or record.get("finishTime") or "").strip()
+    rows = page.locator("tr, .el-table__row, [role='row'], .reserve-item, .reservation-item")
+    for index in range(await rows.count()):
+        row = rows.nth(index)
+        text = " ".join((await row.inner_text()).split())
+        if start and start not in text:
+            continue
+        if end and end not in text:
+            continue
+        buttons = row.locator("button, a, .el-button").filter(has_text=re.compile("取消预约|取消|释放"))
+        if await buttons.count():
+            await buttons.last.click()
+            return True
+    buttons = page.locator("button, a, .el-button").filter(has_text=re.compile("取消预约|取消|释放"))
+    if await buttons.count() == 1:
+        await buttons.first.click()
+        return True
+    return False
+
+
+async def _confirm_cancel_dialog(page) -> None:
+    dialogs = page.locator(".el-message-box:visible, .el-dialog:visible, [role='dialog']:visible")
+    try:
+        await dialogs.last.wait_for(state="visible", timeout=3000)
+    except Exception:
+        return
+    buttons = dialogs.last.get_by_role("button", name=re.compile("确定|确认|是|继续"))
+    if await buttons.count():
+        await buttons.last.click()
+
+
 def _reservation_storage_key(args) -> str:
     return str(getattr(args, "reservation_key", None) or getattr(args, "period", None) or "manual")
 
@@ -686,6 +765,15 @@ def reservation_verification_status(
         if marker in normalized:
             return "failed", None, marker
     if submission_signal[0] == "success":
+        if normalize_time_option(start) == "现在":
+            current_match = find_reservation_by_day_and_end(
+                reservations,
+                day,
+                end,
+                excluded=pre_submit_reservations,
+            )
+            if current_match:
+                return "success", current_match, "网页记录已确认当前时间预约"
         time_match = find_reservation_by_day_and_time(reservations, day, start, end, excluded=pre_submit_reservations)
         if time_match:
             return "success", time_match, "网页记录按日期和时间匹配（地点字段缺失）"
@@ -982,11 +1070,18 @@ async def fetch_user_reservations_with_capabilities(page, auth_state: dict) -> t
 
 
 async def fetch_reservation_history(page, auth: dict) -> list[dict]:
+    return await _fetch_history_pages(page, auth, page_size=100)
+
+
+async def _fetch_history_pages(page, auth: dict, page_size: int) -> list[dict]:
     reservations = []
     page_number = 1
-    page_size = 100
     while True:
-        endpoint = f"/rest/v2/history/{page_number}/{page_size}?token={quote(auth['token'], safe='')}"
+        endpoint = (
+            f"/rest/v2/history/{page_number}/{page_size}"
+            f"?page={page_number}&pageSize={page_size}"
+            f"&token={quote(auth['token'], safe='')}"
+        )
         body = await fetch_reservation_payload(page, endpoint, auth["headers"], "读取预约历史")
         batch, total = history_page_records(body)
         reservations.extend(batch)
@@ -1005,10 +1100,29 @@ async def fetch_reservation_history(page, auth: dict) -> list[dict]:
 
 
 async def fetch_current_reservations(page, auth: dict) -> list[dict]:
+    """Read the web client's paginated “我的预约” history endpoint."""
+    try:
+        records = await _fetch_history_pages(page, auth, page_size=6)
+    except RuntimeError as history_error:
+        # Older deployments may still expose the former lightweight endpoint.
+        endpoint = f"/rest/v2/user/reservations?token={quote(auth['token'], safe='')}"
+        try:
+            body = await fetch_reservation_payload(page, endpoint, auth["headers"], "读取当前预约")
+        except RuntimeError:
+            raise history_error
+        records, _ = history_page_records(body)
+        return records
+    if records:
+        return records
+    # An older deployment can report no rows through history while still
+    # exposing the current-reservation endpoint.
     endpoint = f"/rest/v2/user/reservations?token={quote(auth['token'], safe='')}"
-    body = await fetch_reservation_payload(page, endpoint, auth["headers"], "读取当前预约")
-    records, _ = history_page_records(body)
-    return records
+    try:
+        body = await fetch_reservation_payload(page, endpoint, auth["headers"], "读取当前预约")
+    except RuntimeError:
+        return records
+    current, _ = history_page_records(body)
+    return current or records
 
 
 async def fetch_post_submit_reservations(page, auth: dict) -> list[dict]:

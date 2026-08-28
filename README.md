@@ -349,9 +349,19 @@ Get-Content ".\logs\scheduled-$(Get-Date -Format yyyy-MM-dd).log" -Wait
 | afternoon | `14:30-18:30` | `15:00` | `18:30` |
 | evening   | `19:30-22:00` | `20:00` | `22:00` |
 
-学校同一账号同一时刻只能有一个生效预约。因此每个计划任务每个账号最多提交一个时段；前一个预约未结束时返回 `waiting`，结束后后续计划任务再继续。每天最多成功预约 5 次，默认启用 3 个时段。
+学校同一账号同一时刻只能有一个生效预约。因此每个计划任务每个账号最多提交一个时段；前一个预约未结束时返回 `waiting`，结束后后续计划任务再继续。每天最多成功预约 15 次，默认启用 3 个时段。
 
-程序只负责预约，不负责刷卡签到、暂离、回馆或结束使用。预约成功后仍需遵守学校签到和入馆规则。
+是预约开始前 30 分钟至签到窗口结束后 90 分钟。以 `08:00-12:00` 为例，动态监控时间为 `07:00-09:45`；从签到截止前 2 分钟开始，每 30 分钟取消并按“当前”重新预约，最终截止前 2 分钟仍未显示履约则取消预约。每日动态取消最多 15 次。可通过 `SEAT_DYNAMIC_BEFORE_MINUTES`、`SEAT_DYNAMIC_AFTER_MINUTES`、`SEAT_DYNAMIC_LATE_RESCHEDULE_MINUTES`、`SEAT_DYNAMIC_NORMAL_POLL_SECONDS` 和 `SEAT_DYNAMIC_BOUNDARY_POLL_SECONDS` 调整。
+
+直接运行动态监控：
+
+```powershell
+# 演练：只读取本地演练状态，不提交或取消真实预约
+.\.venv\Scripts\python.exe -m scripts.run_dynamic_monitor --date "2026-08-28" --dry-run
+
+# 真实运行：读取“我的预约”，并按配置执行迟到补偿
+.\.venv\Scripts\python.exe -m scripts.run_dynamic_monitor --date "2026-08-28"
+```
 
 安全默认配置位于 `.env`：
 

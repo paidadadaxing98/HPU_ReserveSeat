@@ -1,5 +1,5 @@
 import re
-from datetime import datetime
+from datetime import date, datetime
 
 
 _CLOCK_RE = re.compile(r"(?<!\d)(\d{1,2}):([0-5]\d)(?!\d)")
@@ -17,6 +17,17 @@ _ACTIVE_RESERVATION_STATUSES = frozenset({
     "预约中",
     "生效",
 })
+_IN_USE_RESERVATION_STATUSES = frozenset({
+    "CHECK_IN",
+    "IN_USE",
+    "USING",
+    "签到成功",
+    "使用中",
+    "履约中",
+})
+_COMPLETED_RESERVATION_STATUSES = frozenset({"COMPLETE", "COMPLETED", "履约完成", "已履约"})
+_MISSED_RESERVATION_STATUSES = frozenset({"AWAY", "MISSED", "失约"})
+_CANCELLED_RESERVATION_STATUSES = frozenset({"CANCEL", "CANCELLED", "CANCELED", "已取消"})
 _LOCAL_RETRY_BLOCKING_STATUSES = frozenset({"reserved", "pending", "uncertain"})
 
 
@@ -105,6 +116,29 @@ def find_reservation_by_day_and_time(
     return match if not (_extract_room(match) and _extract_seat(match)) else None
 
 
+def find_reservation_by_day_and_end(
+    reservations: list[dict],
+    day: str,
+    end: str,
+    excluded: list[dict] | None = None,
+) -> dict | None:
+    """Find the single new active record when the site resolves a current start."""
+    requested_end = _clock_minutes(end)
+    if requested_end is None:
+        return None
+    excluded_keys = {_record_identity(item) for item in (excluded or []) if isinstance(item, dict)}
+    matches = []
+    for item in reservations or []:
+        if not isinstance(item, dict) or _extract_date(item) != day or not _is_active_reservation(item):
+            continue
+        if _record_identity(item) in excluded_keys:
+            continue
+        existing_end = _extract_time(item, ("endTime", "end_time", "end", "finishTime", "finish"))
+        if existing_end == requested_end:
+            matches.append(item)
+    return matches[0] if len(matches) == 1 else None
+
+
 def _record_identity(item: dict) -> str:
     for key in ("id", "reservationId", "reserveId", "recordId"):
         value = item.get(key)
@@ -147,6 +181,39 @@ def blocking_active_reservations_for_day(
     return blocking
 
 
+def blocking_cancelable_reservations_for_day(
+    reservations: list[dict], day: str, now: datetime
+) -> list[dict]:
+    """Return unfinished reservations that the site can still cancel.
+
+    ``CHECK_IN`` is intentionally excluded from the scheduler's active-seat
+    set, but it remains cancellable while the reservation is in progress.
+    """
+    blocking = []
+    in_use_statuses = {status.upper() for status in _IN_USE_RESERVATION_STATUSES}
+    for item in reservations or []:
+        if not isinstance(item, dict) or _extract_date(item) != day:
+            continue
+        status = _reservation_status_value(item).strip().upper()
+        if status not in _ACTIVE_RESERVATION_STATUSES and status not in in_use_statuses:
+            continue
+        end_minutes = _extract_time(item, ("endTime", "end_time", "end", "finishTime", "finish"))
+        if end_minutes is None:
+            blocking.append(item)
+            continue
+        try:
+            end_at = datetime.combine(
+                datetime.fromisoformat(day).date(),
+                _minutes_to_time(end_minutes),
+            )
+        except ValueError:
+            blocking.append(item)
+            continue
+        if now < end_at:
+            blocking.append(item)
+    return blocking
+
+
 def active_reservation_interval(item: dict) -> tuple[int | None, int | None]:
     """Return the active record's start/end minutes for scheduler safety checks."""
     if not isinstance(item, dict) or not _is_active_reservation(item):
@@ -155,6 +222,45 @@ def active_reservation_interval(item: dict) -> tuple[int | None, int | None]:
         _extract_time(item, ("startTime", "start_time", "start", "beginTime", "begin")),
         _extract_time(item, ("endTime", "end_time", "end", "finishTime", "finish")),
     )
+
+
+def reservation_state(item: dict) -> str:
+    """Normalize the site's reservation state without reusing seat-layout states."""
+    value = _reservation_status_value(item)
+    normalized = value.strip().upper()
+    if normalized in {status.upper() for status in _IN_USE_RESERVATION_STATUSES}:
+        return "in_use"
+    if normalized in {status.upper() for status in _COMPLETED_RESERVATION_STATUSES}:
+        return "completed"
+    if normalized in {status.upper() for status in _MISSED_RESERVATION_STATUSES}:
+        return "missed"
+    if normalized in {status.upper() for status in _CANCELLED_RESERVATION_STATUSES}:
+        return "cancelled"
+    if normalized in _ACTIVE_RESERVATION_STATUSES:
+        return "reserved"
+    return "unknown"
+
+
+def find_reservation_record(records: list[dict], day: str, expected: dict) -> dict | None:
+    """Return the unique history row matching one local reservation."""
+    matches = [
+        item for item in records or []
+        if isinstance(item, dict)
+        and _extract_date(item) == day
+        and _reservation_matches_expected(item, expected)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def find_reservation_state(records: list[dict], day: str, expected: dict) -> str | None:
+    """Find the state of one user's reservation record by date/time/location.
+
+    This remains separate from ``active_reservations_for_day``, which is used
+    for seat-availability safety and must continue treating only ``RESERVE``
+    as an active history reservation.
+    """
+    record = find_reservation_record(records, day, expected)
+    return reservation_state(record) if record is not None else None
 
 
 def day_reservations(reservations: list[dict], day: str) -> list[dict]:
@@ -277,18 +383,54 @@ def _is_active_reservation(item: dict) -> bool:
     return False
 
 
+def _reservation_status_value(item: dict) -> str:
+    for key in ("stat", "status", "state", "reservationStatus", "reserveStatus", "bookingStatus"):
+        if key not in item:
+            continue
+        value = item.get(key)
+        if isinstance(value, dict):
+            value = value.get("code") or value.get("name") or value.get("value") or value.get("status")
+        return _value_text(value)
+    return ""
+
+
+def _reservation_matches_expected(item: dict, expected: dict) -> bool:
+    expected_start = _clock_minutes(expected.get("start", ""))
+    expected_end = _clock_minutes(expected.get("end", ""))
+    actual_start = _extract_time(item, ("startTime", "start_time", "start", "beginTime", "begin"))
+    actual_end = _extract_time(item, ("endTime", "end_time", "end", "finishTime", "finish"))
+    if expected_end is not None and actual_end != expected_end:
+        return False
+    if expected_start is not None and actual_start is not None and actual_start != expected_start:
+        return False
+    expected_room = _normalize_room(expected.get("room", ""))
+    actual_room = _extract_room(item)
+    if expected_room and actual_room and not _room_matches(actual_room, expected_room):
+        return False
+    expected_seat = _normalize_seat(_value_text(expected.get("seat", "")))
+    actual_seat = _extract_seat(item)
+    if expected_seat and actual_seat and not _seats_match(actual_seat, expected_seat):
+        return False
+    return expected_end is not None and actual_end is not None
+
+
 def _extract_date(item: dict) -> str | None:
     for key in ("date", "day", "onDate", "reservationDate", "reserveDate"):
         value = _value_text(item.get(key))
         match = _DATE_RE.search(value)
         if match:
-            return match.group(0)
+            return _normalize_date(match.group(0))
     for key in ("startTime", "start_time", "start", "beginTime", "begin"):
         value = _value_text(item.get(key))
         match = _DATE_RE.search(value)
         if match:
-            return match.group(0)
+            return _normalize_date(match.group(0))
     return None
+
+
+def _normalize_date(value: str) -> str:
+    year, month, day = (int(part) for part in value.split("-"))
+    return date(year, month, day).isoformat()
 
 
 def _extract_room(item: dict) -> str:
@@ -371,6 +513,8 @@ def requested_times_available(options: list[str], requested: list[str]) -> bool:
 
 def normalize_time_option(value: str) -> str:
     normalized = "".join(value.replace("：", ":").split())
+    if normalized.lower() in {"now", "current"} or normalized in {"当前", "现在"}:
+        return "现在"
     if ":" not in normalized:
         return normalized
     hour, minute = normalized.split(":", 1)
@@ -442,6 +586,8 @@ def end_times_response_matches(url: str, start: str) -> bool:
 
 def validate_half_hour_time(value: str) -> str:
     normalized = normalize_time_option(value)
+    if normalized == "现在":
+        return normalized
     hour, minute = map(int, normalized.split(":"))
     if minute not in (0, 30):
         raise ValueError(f"预约时间必须按30分钟设置：{value}")
