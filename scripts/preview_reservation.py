@@ -1310,7 +1310,38 @@ async def close_time_dialog(page):
         await buttons.last.click()
     else:
         await page.keyboard.press("Escape")
-    await page.wait_for_timeout(300)
+    await page.wait_for_timeout(250)
+
+    # Some deployments keep the time picker behind a custom mask instead of
+    # wiring the Element UI header button to the same close handler. Click the
+    # mask's corner first, then fall back to Escape if it remains visible.
+    mask = page.locator(".reserve-time-Mask:visible")
+    try:
+        mask_count = await mask.count()
+    except Exception:
+        mask_count = 0
+    if mask_count:
+        target = getattr(mask, "last", mask)
+        try:
+            await target.click(position={"x": 2, "y": 2}, timeout=1500)
+        except TypeError:
+            try:
+                await target.click()
+            except Exception:
+                pass
+        except Exception:
+            try:
+                await target.click()
+            except Exception:
+                pass
+        await page.wait_for_timeout(250)
+        try:
+            if await mask.count():
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(250)
+        except Exception:
+            pass
+
     for selector in (".el-dialog:visible", ".reserve-time-Mask:visible"):
         locator = page.locator(selector)
         target = getattr(locator, "first", locator)

@@ -1063,3 +1063,77 @@ def test_close_time_dialog_waits_for_mask_to_disappear():
     assert asyncio.run(close_time_dialog(page)) is None
     assert page.dialogs.button.clicked is True
     assert page.mask.hidden is True
+
+
+def test_close_time_dialog_clicks_mask_when_header_button_does_not_close_it():
+    class Mask:
+        def __init__(self):
+            self.hidden = False
+            self.clicks = 0
+            self.on_click = None
+
+        async def click(self, **kwargs):
+            self.clicks += 1
+            self.hidden = True
+            if self.on_click is not None:
+                self.on_click()
+
+        async def wait_for(self, state, timeout):
+            if state == "hidden" and not self.hidden:
+                raise TimeoutError("mask still visible")
+
+        async def count(self):
+            return 1 if not self.hidden else 0
+
+    class Button:
+        def __init__(self, dialogs):
+            self.dialogs = dialogs
+
+        async def click(self):
+            return None
+
+        @property
+        def last(self):
+            return self
+
+        async def count(self):
+            return 1
+
+    class Dialogs:
+        def __init__(self, mask):
+            self.hidden = False
+            self.button = Button(self)
+            self.mask = mask
+
+        def locator(self, selector):
+            return self.button
+
+        async def wait_for(self, state, timeout):
+            if state == "hidden" and not self.hidden:
+                raise TimeoutError("dialog still visible")
+
+        async def count(self):
+            return 0 if self.hidden else 1
+
+    class Page:
+        def __init__(self):
+            self.mask = Mask()
+            self.dialogs = Dialogs(self.mask)
+            self.mask.on_click = lambda: setattr(self.dialogs, "hidden", True)
+            self.keyboard = SimpleNamespace(press=lambda key: (_ for _ in ()).throw(AssertionError("escape fallback should not be used")))
+
+        def locator(self, selector):
+            if selector == ".el-dialog:visible":
+                return self.dialogs
+            if selector == ".reserve-time-Mask:visible":
+                return self.mask
+            raise AssertionError(selector)
+
+        async def wait_for_timeout(self, milliseconds):
+            return None
+
+    page = Page()
+
+    assert asyncio.run(close_time_dialog(page)) is None
+    assert page.mask.clicks == 1
+    assert page.mask.hidden is True

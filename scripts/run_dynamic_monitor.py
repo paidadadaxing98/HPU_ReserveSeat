@@ -154,41 +154,84 @@ async def run_account(
     event_writer=None,
     target_period: str | None = None,
     deadline: datetime | None = None,
+    clock=None,
 ) -> dict:
     event_writer = _default_event_writer if event_writer is None else event_writer
+    clock = datetime.now if clock is None else clock
     monitor = DynamicMonitor(service)
     _emit_event(service, event_writer, "monitor_start", day=day)
     prepare_kwargs = {"target_period": target_period} if target_period is not None else {}
+    has_pending = getattr(monitor, "has_pending_commands", None)
+
+    def pending_commands_exist() -> bool:
+        return bool(has_pending(day)) if has_pending is not None else False
+
     prepared = monitor.prepare(day, **prepare_kwargs)
-    if prepared.get("status") == "disabled" and not monitor.has_pending_commands(day):
+    pending_commands = pending_commands_exist()
+    if prepared.get("status") == "disabled" and not pending_commands:
         _emit_event(service, event_writer, "monitor_disabled", day=day, status="disabled")
         return prepared
-    if not prepared and not monitor.has_pending_commands(day):
+    if not prepared and not pending_commands and (deadline is None or once):
         _emit_event(service, event_writer, "monitor_idle", day=day, status="idle")
         return {"status": "idle", "message": "当天没有可监测的有效预约"}
     dry_run = bool(getattr(service.settings, "dry_run", False))
     provider = None
-    last_result = prepared
+    last_result = prepared or {"status": "waiting", "message": "等待本地预约记录"}
     reconnect_attempt = 0
+    first_cycle = True
     try:
         while True:
-            now = datetime.now()
+            now = clock()
             if deadline is not None and now >= deadline:
                 return last_result
-            delay_kwargs = {"target_period": target_period} if target_period is not None else {}
-            delay = monitor.next_poll_delay(day, now, **delay_kwargs)
-            if delay is None:
-                return last_result
+            if not first_cycle:
+                prepared = monitor.prepare(day, **prepare_kwargs)
+                pending_commands = pending_commands_exist()
+            if prepared.get("status") == "disabled" and not pending_commands:
+                _emit_event(service, event_writer, "monitor_disabled", day=day, status="disabled")
+                return prepared
+            has_work = bool(prepared) or pending_commands
+            normal_poll = timedelta(
+                seconds=getattr(service.settings, "dynamic_normal_poll_seconds", 180)
+            )
+            local_scan_only = False
+            if not has_work:
+                if deadline is None or once:
+                    return last_result
+                delay = normal_poll
+            else:
+                delay_kwargs = {"target_period": target_period} if target_period is not None else {}
+                delay = monitor.next_poll_delay(day, now, **delay_kwargs)
+                if delay is None:
+                    if deadline is None:
+                        return last_result
+                    delay = normal_poll
+                    local_scan_only = True
+                elif delay > normal_poll:
+                    delay = normal_poll
+                    local_scan_only = True
+            had_work = has_work
+            first_cycle = False
             seconds = max(0.0, delay.total_seconds())
             if deadline is not None:
-                seconds = min(seconds, max(0.0, (deadline - datetime.now()).total_seconds()))
+                seconds = min(seconds, max(0.0, (deadline - clock()).total_seconds()))
                 if seconds <= 0:
                     return last_result
             if seconds:
                 await sleep(seconds)
-            now = datetime.now()
+            now = clock()
             if deadline is not None and now >= deadline:
                 return last_result
+            refreshed = monitor.prepare(day, **prepare_kwargs)
+            refreshed_pending = pending_commands_exist()
+            if not had_work and not refreshed_pending:
+                # A new reservation is picked up on the next cycle so its own
+                # dynamic window is recalculated before any browser access.
+                continue
+            if not refreshed and not refreshed_pending:
+                continue
+            if local_scan_only:
+                continue
             access_error = ""
             reservation_error = ""
             records = []
@@ -319,6 +362,19 @@ async def run_account(
             _emit_event(service, event_writer, "session_closed", day=day, reason="monitor_end")
 
 
+async def _run_account_safely(service, day: str, kwargs: dict) -> tuple[str, dict]:
+    account_id = getattr(service, "account_id", "default")
+    try:
+        result = await run_account(service, day, **kwargs)
+    except Exception as exc:
+        _emit_event(service, _default_event_writer, "monitor_failure", day=day, error_type=type(exc).__name__)
+        result = {
+            "status": "error",
+            "message": f"动态监控异常：{type(exc).__name__}",
+        }
+    return account_id, result
+
+
 async def run_monitor(
     day: str,
     dry_run: bool = False,
@@ -334,21 +390,21 @@ async def run_monitor(
         notify_reservation_results=True,
         notify_scheduler_summary=False,
     )
-    results = {}
     deadline = (
         datetime.now() + timedelta(minutes=run_for_minutes)
         if run_for_minutes is not None
         else None
     )
+    account_kwargs = []
     for service in services:
-        account_id = getattr(service, "account_id", "default")
         kwargs = {"once": once}
         if period is not None:
             kwargs["target_period"] = period
         if deadline is not None:
             kwargs["deadline"] = deadline
-        results[account_id] = await run_account(service, day, **kwargs)
-    return results
+        account_kwargs.append(_run_account_safely(service, day, kwargs))
+    pairs = await asyncio.gather(*account_kwargs)
+    return dict(pairs)
 
 
 def parse_args(argv=None):
