@@ -34,6 +34,7 @@ class DynamicMonitor:
         access_error: str = "",
         reservation_records: list[dict] | None = None,
         reservation_error: str = "",
+        target_period: str | None = None,
     ) -> dict:
         command_results = self._process_pending_commands(day, now)
         enabled = [
@@ -49,6 +50,8 @@ class DynamicMonitor:
             if command_results:
                 result["commands"] = command_results
             return result
+        if target_period is not None:
+            enabled = [(name, period) for name, period in enabled if name == target_period]
         entry_at = first_entry_time(records or [], day)
         results = {"commands": command_results} if command_results else {}
         for period_name, _period in enabled:
@@ -226,7 +229,7 @@ class DynamicMonitor:
                 results[period_name] = "cancel_unentered" if result.success else "error_hold"
         return results
 
-    def prepare(self, day: str) -> dict:
+    def prepare(self, day: str, target_period: str | None = None) -> dict:
         """Create restart-safe sessions without querying the access provider."""
         enabled = [
             name for name, period in self.settings.periods.items()
@@ -234,6 +237,8 @@ class DynamicMonitor:
         ]
         if not self.settings.dynamic_compensation_enabled or len(enabled) > self.settings.dynamic_max_periods:
             return {"status": "disabled"}
+        if target_period is not None:
+            enabled = [name for name in enabled if name == target_period]
         sessions = {}
         now = datetime.now()
         for period_name in enabled:
@@ -248,11 +253,14 @@ class DynamicMonitor:
         now: datetime,
         records: list[dict] | None = None,
         reservation_records: list[dict] | None = None,
+        target_period: str | None = None,
     ) -> bool:
         if self.has_pending_commands(day):
             return True
         entry_at = first_entry_time(records or [], day)
         for session in self.service.repo.dynamic_sessions(day):
+            if target_period is not None and session["period"] != target_period:
+                continue
             if session["status"] == "entered":
                 if reservation_records is None:
                     continue
@@ -284,11 +292,13 @@ class DynamicMonitor:
                 return True
         return False
 
-    def next_poll_delay(self, day: str, now: datetime):
+    def next_poll_delay(self, day: str, now: datetime, target_period: str | None = None):
         delays = []
         if self.has_pending_commands(day):
             delays.append(timedelta(seconds=self.settings.dynamic_boundary_poll_seconds))
         for session in self.service.repo.dynamic_sessions(day):
+            if target_period is not None and session["period"] != target_period:
+                continue
             if session["status"] == "entered":
                 delays.append(timedelta(seconds=self.settings.dynamic_boundary_poll_seconds))
                 continue

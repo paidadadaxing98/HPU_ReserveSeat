@@ -2,6 +2,7 @@
 .venv/
 *.egg-info/
 .browser-profile/
+monitor-profile/
 accounts.json
 accounts/
 seat_assistant.db

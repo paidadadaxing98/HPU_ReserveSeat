@@ -11,13 +11,18 @@ def test_morning_task_has_a_next_day_fallback_trigger():
     assert '$item.FallbackAt' in script
 
 
-def test_installer_registers_hidden_time_limited_bot_tasks():
+def test_installer_registers_dynamic_monitor_tasks_with_full_window_runtime():
     script = INSTALL_TASK.read_text(encoding="utf-8")
 
+    assert 'SeatAssistant-Dynamic-Morning' in script
+    assert 'scripts.dynamic_task_schedule' in script
+    assert 'scripts.run_dynamic_monitor --period' in script
+    assert '--run-for-minutes' in script
+
+
+def test_installer_no_longer_registers_independent_bot_tasks():
+    script = INSTALL_TASK.read_text(encoding="utf-8")
+
+    assert 'Register-ScheduledTask' in script
+    assert '$botDefinitions' not in script
     assert 'SeatAssistant-Bot-Morning' in script
-    assert 'SeatAssistant-Bot-Morning-Fallback' in script
-    assert 'SeatAssistant-Bot-Afternoon' in script
-    assert 'SeatAssistant-Bot-Evening' in script
-    assert 'scripts.run_wecom_bot --run-for-minutes' in script
-    assert '-RestartCount 5' in script
-    assert '-RestartInterval (New-TimeSpan -Minutes 1)' in script

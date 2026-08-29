@@ -1,430 +1,195 @@
 # Seat Assistant
 
-当前版本：`v1.0.6`
+当前版本：`v1.1.0`
 
-本项目在 Windows 本机运行，通过 Playwright 登录河南理工大学图书馆座位系统，支持账号初始化、手动预约和无感定时预约。
+Seat Assistant 是一个运行在 Windows 本机的座位预约助手。它通过 Playwright 操作河南理工大学图书馆座位系统，支持预约、结果核验、企业微信通知、动态签到窗口补偿和暂离超时保护。
 
 ## 快速开始
 
-### 1. 环境参数准备
+以下命令均在项目根目录的 PowerShell 中执行。项目只支持 Windows，要求 Python 3.11 及以上，并安装 Google Chrome。
 
-1. 复制环境模板：
+### 1. 创建环境
+
+`.venv` 不提交到仓库。新电脑下载项目后，在项目根目录执行：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e ".[test]"
+```
+
+程序使用本机 Chrome 的持久化浏览器会话，默认路径为：
+
+```text
+C:\Program Files\Google\Chrome\Application\chrome.exe
+```
+
+如果 Chrome 安装在其他位置，需要调整代码中的浏览器路径后再运行。
+
+### 2. 创建配置
 
 ```powershell
 Copy-Item .env.example .env
 Copy-Item accounts.example.json accounts.json
+notepad .env
+notepad accounts.json
 ```
 
-2. 打开 `.env`，填入本机要用的值，至少确认这些项：
+至少修改以下内容：
 
-```dotenv
-SEAT_CONTROL_TOKEN=换成你自己的长随机字符串
-SEAT_WECOM_WEBHOOK=你的企业微信 Webhook（需要推送才填）
-SEAT_WECOM_BOT_ID=
-SEAT_WECOM_BOT_SECRET=
-SEAT_DB_PATH=seat_assistant.db
-SEAT_ACCOUNTS_FILE=accounts.json
-```
+- `accounts.json`：填写账号、密码，保留一个 `enabled: true` 的账号，并确认图书馆、阅览室和座位偏好。
+- `.env`：设置随机的 `SEAT_CONTROL_TOKEN`。
+- 需要企业微信通知时，填写 `SEAT_WECOM_WEBHOOK`。
+- 需要企业微信双向控制时，再填写 `SEAT_WECOM_BOT_ID`、`SEAT_WECOM_BOT_SECRET` 和账号的 `wecom_user_id`。
+- 需要根据门禁记录判断早到时，填写校准后的 `SEAT_ACCESS_RECORDS_URL`；没有该地址时，迟到补偿和“我的预约”状态判断仍可用，早到识别不可用。
 
-3. 打开 `accounts.json`，补齐账号信息、别名、Webhook 和初始化配置。
-   如果是多账号模式，建议每个账号都保留自己的 `id`，数据库也会跟着账号分开保存。
+### 3. 初始化账号
 
-4. 第一次运行初始化账号后，程序会自动生成数据库和本地浏览器资料；你通常不需要手工新建 `seat_assistant.db`。
-
-### 2.1 添加新账号
-
-账号命令使用的是 `accounts.json` 中的 `id`，不是学号。编辑项目根目录的 `accounts.json`：
-
-```json
-{
-  "id": "account03",
-  "enabled": true,
-  "account": "统一认证账号",
-  "password": "统一认证密码",
-  "wecom_webhook": ""
-}
-```
-
-只有 `enabled: true` 的账号会被加载、登录和预约。禁用账号不会校验账号密码，也不会创建会话：
-
-```json
-{
-  "id": "account04",
-  "enabled": false,
-  "account": "以后再启用的账号",
-  "password": "以后再启用的密码"
-}
-```
-
-账号 ID 必须唯一。多账号时命令必须带 `--account account03`。
-
-### 2.2 初始化账号
-
-先测试登录：
+初始化只验证登录、座位首页和“我的预约”，不会预约座位。初始化会自动采集图书馆列表，并让你选择座位策略、阅览室和学习窗口：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/test_login.py --account account03
+.\.venv\Scripts\python.exe scripts\test_login.py --account my-account
+.\.venv\Scripts\python.exe scripts\initialize_account.py --account my-account
 ```
 
-需要查看登录页面时使用：
+多账号时把 `my-account` 替换为 `accounts.json` 中的 `id`。例如：`scripts/initialize_account.py --account account03`。只有 `enabled: true` 的账号会运行。
+
+### 4. 手动预约
+
+先预览，不提交真实预约：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/diagnose_login.py account03
-```
-
-执行初始化：
-
-```powershell
-.\.venv\Scripts\python.exe scripts/initialize_account.py --account account03
-```
-
-初始化只验证登录、座位系统首页和“我的预约”接口，不预约座位。它会把位置、座位偏好和学习窗口写回 `accounts.json`，并把初始化状态写入 `accounts/account03/seat_assistant.db`。
-初始化过程中会自动采集并按编号显示三个图书馆各自的阅览室，后续 `--seat 图书馆编号-阅览室编号-座位号` 按这次显示的编号填写。
-
-只想查看编号、不修改初始化配置时，使用：
-
-```powershell
-.\.venv\Scripts\python.exe scripts/list_catalog.py --account account03
-```
-
-这个命令会重新登录并输出全部图书馆和阅览室，例如：
-
-```text
-图书馆 1. 南校区第一图书馆
-  1. ...
-图书馆 2. 南校区第二图书馆
-  1. ...
-图书馆 3. 北校区图书馆
-  1. ...
-```
-
-阅览室编号是当前页面动态采集的结果，不能把某个图书馆的编号用于另一个图书馆。学校调整目录后，请重新执行该命令。
-
-初始化交互顺序：
-
-1. 自动采集图书馆列表并选择图书馆，无需手动先点击下拉框。
-2. 选择座位策略：随机空闲座位、指定楼层内随机、具体座位优先。
-3. 具体座位优先时，选择阅览室，再输入座位号，例如 `23 45 85`。
-4. 设置 morning、afternoon、evening 学习窗口；直接回车保留默认值。
-
-图书馆编号由当前页面动态采集，通常为：
-
-| 图书馆编号 | 图书馆      |
-| -----:| -------- |
-| 1     | 南校区第一图书馆 |
-| 2     | 南校区第二图书馆 |
-| 3     | 北校区图书馆   |
-
-| 阅览室编号 | 第二图书馆         | 第一图书馆       | 北图书馆   |
-| -----:| ------------- | ----------- | ------ |
-| 1     | 1层自主学习空间（Ⅰ）   | 中国文学类借阅区    | 负一楼自习室 |
-| 2     | 2层报刊阅览区       | 外国文学类借阅区    | 一楼自习室  |
-| 3     | 3F多媒体信息共享空间   | 文学综合类借阅区    | 三楼自习室A |
-| 4     | 3层自主学习空间（Ⅱ）   | 朗读亭         | 三楼自习室B |
-| 5     | 3层自主学习空间（Ⅲ）   | 三楼天井区       |        |
-| 6     | 4层工程技术类借阅区    | 三楼自主学习空间（Ⅰ） |        |
-| 7     | 4层计算机类借阅区     | 四楼多媒体       |        |
-| 8     | 5层外文图书原版借阅区   | 四楼天井区       |        |
-| 9     | 5层工程技术类借阅区    | 五楼天井区       |        |
-| 10    | 5层自然科学借阅区     | 五楼自主学习空间（Ⅲ） |        |
-| 11    | 6层社会科学借阅区（Ⅰ）  | 五楼自习室       |        |
-| 12    | 6层社会科学类借阅区（Ⅱ） | 六楼自习室       |        |
-| 13    | 7层社会科学类借阅区1   |             |        |
-| 14    | 7层社会科学类借阅区2   |             |        |
-| 15    | 7层自主学习空间（V）   |             |        |
-| 16    | 7层自主学习空间（Ⅳ）   |             |        |
-
-例如“南校区第二图书馆 -> 5层自然科学借阅区 -> 座位 23、45、85”：
-
-```powershell
-.\.venv\Scripts\python.exe scripts/initialize_account.py `
-  --account account03 `
-  --seat 2-10-23 `
-  --seat 2-10-45 `
-  --seat 2-10-85 `
-  --time 09:00-10:00 14:30-18:30 19:30-22:00
-```
-
-`--seat` 格式是 `图书馆编号-阅览室编号-座位号`：
-
-| 写法        | 含义                           |
-| --------- | ---------------------------- |
-| `2-x-x`   | 第二图书馆内随机阅览室、随机空闲座位           |
-| `2-10-x`  | 固定第二图书馆第 10 个阅览室，随机空闲座位      |
-| `2-10-23` | 固定第二图书馆第 10 个阅览室，优先尝试 23 号座位 |
-
-可以重复使用 `--seat`。规则越具体越优先，`x` 表示该级别自动选择。
-
-时间窗口也可以通过命令行设置：
-
-```powershell
-# 依次对应 morning、afternoon、evening；x 表示不修改
-.\.venv\Scripts\python.exe scripts/initialize_account.py `
-  --account account03 `
-  --time 09:00-10:00 x 19:30-22:00
-```
-
-查看全部参数：
-
-```powershell
-.\.venv\Scripts\python.exe scripts/initialize_account.py --help 
-```
-
-### 3. 手动预约：演练、确认提交、直接提交
-
-日期只能填写当前允许预约的当天或次日，时间必须按 30 分钟填写，并位于账号学习窗口内。
-
-只演练、不提交：不加 `--submit`。浏览器会打开并停在“立即预约”前：
-
-```powershell
-.\.venv\Scripts\python.exe scripts/preview_reservation.py `
-  --account account03 `
-  --date "2026-08-22" `
+.\.venv\Scripts\python.exe scripts\preview_reservation.py `
+  --account my-account `
+  --date "2026-08-30" `
   --start "20:00" `
-  --end "21:30" `
-  --preferred 23 45 85
+  --end "22:00"
 ```
 
-调试真实提交：加 `--submit --confirm-submit`。页面选好后，终端会要求输入大写 `SUBMIT`：
+确认页面信息正确后，再提交真实预约：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/preview_reservation.py `
-  --account account03 `
-  --date "2026-08-22" `
+.\.venv\Scripts\python.exe scripts\preview_reservation.py `
+  --account my-account `
+  --date "2026-08-30" `
   --start "20:00" `
-  --end "21:30" `
-  --preferred 23 45 85 `
+  --end "22:00" `
   --submit `
   --confirm-submit
 ```
 
-确认页面中的图书馆、阅览室、座位、日期和时间都正确后输入 `SUBMIT`。直接回车不提交。
+按终端提示输入大写 `SUBMIT`。日期、时间、阅览室和座位必须以实际页面允许的选项为准。
 
-确认无误后自动真实提交：
+### 5. 自动预约和动态监控
 
-```powershell
-.\.venv\Scripts\python.exe scripts/preview_reservation.py `
-  --account account03 `
-  --date "2026-08-22" `
-  --start "20:00" `
-  --end "21:30" `
-  --preferred 23 45 85 `
-  --submit
-```
-
-`--room` 和 `--preferred` 是本次命令的临时覆盖项；省略它们时使用初始化保存的位置和座位偏好。`--room` 不单独指定图书馆，图书馆来自账号初始化配置。
-
-### 4. 安装静默定时任务
-
-默认安装为真实提交模式：
+先用演练模式检查配置：
 
 ```powershell
-.\scripts\install-task.ps1
+.\scripts\install-task.ps1 -DryRun -Python ".\.venv\Scripts\python.exe"
 ```
 
-当前安装脚本默认参数：
-
-| 参数               | 默认值     | 作用                                |
-| ---------------- | -------:| --------------------------------- |
-| `-MorningAt`     | `22:05` | 前一天开始检查次日上午预约；次日 `07:00` 另有一次补偿触发 |
-| `-AfternoonAt`   | `12:30` | 当天开始检查下午预约                        |
-| `-EveningAt`     | `19:10` | 当天开始检查晚上预约                        |
-| `-Period04At`    | `10:05` | 当天开始检查第4段预约                       |
-| `-Period05At`    | `13:05` | 当天开始检查第5段预约                       |
-| `-RepeatMinutes` | `10`    | 任务触发间隔                            |
-
-安装脚本还会为每个预约窗口创建对应的隐藏机器人任务。机器人在预约首次触发前 1 分钟启动，在最后一次预约触发后保留 15 分钟，然后由 `--run-for-minutes` 自动退出并释放锁文件。机器人任务失败后每 1 分钟最多自动重启 5 次，并设置了唤醒电脑、联网后启动和电池运行条件。
-
-机器人任务名称包括：
-
-```text
-SeatAssistant-Bot-Morning
-SeatAssistant-Bot-Morning-Fallback
-SeatAssistant-Bot-Afternoon
-SeatAssistant-Bot-Evening
-SeatAssistant-Bot-Period04
-SeatAssistant-Bot-Period05
-```
-
-修改时间后重新安装：
+确认无误后安装真实预约任务：
 
 ```powershell
-.\scripts\install-task.ps1 `
-  -MorningAt "22:05" `
-  -AfternoonAt "12:30" `
-  -EveningAt "19:10" `
-  -Period04At "10:05" `
-  -Period05At "13:05" `
-  -RepeatMinutes 10
+.\scripts\install-task.ps1 -Python ".\.venv\Scripts\python.exe"
 ```
 
-静默任务默认强制使用真实预约，不受 `.env` 中 `SEAT_DRY_RUN` 影响。需要调试计划任务但不提交真实预约时，重新安装为演练模式：
+修改代码或动态窗口配置后，需要重新执行上面的命令以更新 Windows 定时任务。
+
+动态监控也可以手动运行。指定时段和完整动态窗口时，机器人会由同一个进程托管，并在窗口结束时一并退出：
 
 ```powershell
-.\scripts\install-task.ps1 -DryRun
+.\.venv\Scripts\python.exe -m scripts.run_dynamic_monitor --date (Get-Date -Format yyyy-MM-dd)
+.\.venv\Scripts\python.exe -m scripts.run_dynamic_monitor `
+  --date (Get-Date -Format yyyy-MM-dd) `
+  --period morning `
+  --run-for-minutes 165
 ```
 
-演练确认无误后，重新安装真实模式：
+安装定时任务后，静态预约任务继续负责每天预约；动态任务会按安装时读取到的配置，为每个启用时段覆盖完整动态窗口。动态任务名称为 `SeatAssistant-Dynamic-Morning`、`SeatAssistant-Dynamic-Afternoon`、`SeatAssistant-Dynamic-Evening`、`SeatAssistant-Dynamic-Period04` 和 `SeatAssistant-Dynamic-Period05`。重新调整动态窗口、默认到馆时间或启用时段后，需要重新运行安装脚本；超过 3 个启用时段时，动态任务会被跳过。
+
+监控程序会在动态窗口内按配置查询，并在需要取消或重约时打开独立的后台浏览器会话。查询失败时保留当前预约并进入安全保持状态。有限时长运行会托管一个企业微信机器人，机器人和监控共享同一个生命周期；没有机器人凭据时只运行监控。
+
+
+## 常用命令
 
 ```powershell
-.\scripts\install-task.ps1
-```
+# 查看初始化和座位目录
+.\.venv\Scripts\python.exe scripts\list_catalog.py --account my-account
 
-查看任务和最近一次执行结果：
+# 查看登录页面和接口诊断信息
+.\.venv\Scripts\python.exe scripts\diagnose_login.py my-account
 
-```powershell
-Get-ScheduledTask -TaskName `
-  "SeatAssistant-Morning","SeatAssistant-Afternoon","SeatAssistant-Evening"
-Get-ScheduledTaskInfo -TaskName "SeatAssistant-Evening"
-Get-ScheduledTask -TaskName "SeatAssistant-Bot-Evening"
-Get-ScheduledTaskInfo -TaskName "SeatAssistant-Bot-Evening"
-```
+# 查看动态监控日志
+Get-Content ".\logs\dynamic-monitor-$(Get-Date -Format yyyy-MM-dd).log" -Wait
 
-按任务查看、修改、测试和恢复：
-
-```powershell
-# 查看
-Get-ScheduledTask -TaskName "SeatAssistant-Morning"
-Get-ScheduledTaskInfo -TaskName "SeatAssistant-Morning"
-Get-ScheduledTask -TaskName "SeatAssistant-Afternoon"
-Get-ScheduledTaskInfo -TaskName "SeatAssistant-Afternoon"
-Get-ScheduledTask -TaskName "SeatAssistant-Evening"
-Get-ScheduledTaskInfo -TaskName "SeatAssistant-Evening"
-Get-ScheduledTask -TaskName "SeatAssistant-Period04"
-Get-ScheduledTaskInfo -TaskName "SeatAssistant-Period04"
-Get-ScheduledTask -TaskName "SeatAssistant-Period05"
-Get-ScheduledTaskInfo -TaskName "SeatAssistant-Period05"
-
-# 修改
-.\scripts\install-task.ps1 -MorningAt "22:05" -AfternoonAt "12:30" -EveningAt "19:10" -RepeatMinutes 10
-.\scripts\install-task.ps1 -MorningAt "22:10" -AfternoonAt "12:35" -EveningAt "19:15" -RepeatMinutes 15
-.\scripts\install-task.ps1 -MorningAt "22:05" -AfternoonAt "12:30" -EveningAt "19:10" -Period04At "10:05" -Period05At "13:05" -RepeatMinutes 10
-
-# 测试
-Start-ScheduledTask -TaskName "SeatAssistant-Morning"
-Start-ScheduledTask -TaskName "SeatAssistant-Afternoon"
-Start-ScheduledTask -TaskName "SeatAssistant-Evening"
-Start-ScheduledTask -TaskName "SeatAssistant-Bot-Evening"
-Start-ScheduledTask -TaskName "SeatAssistant-Period04"
-Start-ScheduledTask -TaskName "SeatAssistant-Period05"
-
-# 恢复
-.\scripts\install-task.ps1
-```
-
-也可以绕过 Windows 计划任务，直接手动执行同一套静默入口：
-
-```powershell
-# 演练，不提交真实预约
-.\.venv\Scripts\python.exe -m scripts.run_scheduled_task --period evening --dry-run
-
-# 真实提交，使用账号初始化保存的配置
-.\.venv\Scripts\python.exe -m scripts.run_scheduled_task --period evening
-
-# 单独演练机器人，启动 5 分钟后自动退出
-.\.venv\Scripts\python.exe -m scripts.run_wecom_bot --run-for-minutes 5
-```
-
-定时任务演练会完整运行账号初始化检查、预约流程和通知流程，但结果只标记为 `dry-run`：不会提交真实预约，不写入 `reservations` 的 `reserved` 记录，也不会增加每日成功预约次数。`--dry-run` 会强制使用演练适配器，不受 `.env` 中 `SEAT_DRY_RUN=false` 影响。真实提交不要加 `--dry-run`，并确认计划任务已用不带 `-DryRun` 的命令重新安装。
-
-当前静默任务使用无头浏览器，不弹出窗口、不抢占桌面；每次 Python 进程执行一轮后退出。定时任务不会启动企业微信智能机器人；机器人仍保留为独立扩展入口，需要时单独运行。定时任务只发送一条账号汇总通知，不再同时发送每个预约结果明细。电脑可以锁屏或睡眠，但必须保持 Windows 用户会话有效、联网且不能关机或注销。日志位于：
-
-```powershell
+# 查看自动预约日志
 Get-Content ".\logs\scheduled-$(Get-Date -Format yyyy-MM-dd).log" -Wait
-```
 
-卸载任务：
+# 单独启动企业微信双向机器人（调试或长期运行）
+.\.venv\Scripts\python.exe scripts\run_wecom_bot.py
 
-```powershell
+# 手动启动一个时段的动态监控和托管机器人
+.\.venv\Scripts\python.exe -m scripts.run_dynamic_monitor --period morning --run-for-minutes 165
+
+# 启动本机控制页
+.\.venv\Scripts\python.exe -m seat_assistant.main
+
+# 运行测试
+.\.venv\Scripts\python.exe -m pytest -q --basetemp .pytest-tmp
+
+# 卸载 Windows 定时任务
 .\scripts\install-task.ps1 -Uninstall
 ```
 
-## 配置和业务规则
+静默任务默认安装为真实预约；仅调试时使用 `-DryRun`。手动预约是否提交由 `--submit` 决定。
 
-默认学习窗口：
+## 实现介绍
 
-| 时段        | 默认窗口          | 默认预约开始  | 默认结束    |
-| --------- | ------------- | -------:| -------:|
-| morning   | `08:00-12:00` | `08:30` | `12:00` |
-| afternoon | `14:30-18:30` | `15:00` | `18:30` |
-| evening   | `19:30-22:00` | `20:00` | `22:00` |
+项目按三层协作：
 
-学校同一账号同一时刻只能有一个生效预约。因此每个计划任务每个账号最多提交一个时段；前一个预约未结束时返回 `waiting`，结束后后续计划任务再继续。每天最多成功预约 15 次，默认启用 3 个时段。
+| 层 | 作用 | 事实来源 |
+|---|---|---|
+| 配置层 | 保存账号、学习时段、位置偏好、企业微信和动态参数 | `.env`、`accounts.json` |
+| 远端操作层 | 登录、选座、预约、取消、读取“我的预约”和门禁记录 | 学校网页及其 API |
+| 本地状态层 | 保存预约结果、会话进度、命令队列、去重记录和限额 | SQLite 数据库 |
 
-是预约开始前 30 分钟至签到窗口结束后 90 分钟。以 `08:00-12:00` 为例，动态监控时间为 `07:00-09:45`；从签到截止前 2 分钟开始，每 30 分钟取消并按“当前”重新预约，最终截止前 2 分钟仍未显示履约则取消预约。每日动态取消最多 15 次。可通过 `SEAT_DYNAMIC_BEFORE_MINUTES`、`SEAT_DYNAMIC_AFTER_MINUTES`、`SEAT_DYNAMIC_LATE_RESCHEDULE_MINUTES`、`SEAT_DYNAMIC_NORMAL_POLL_SECONDS` 和 `SEAT_DYNAMIC_BOUNDARY_POLL_SECONDS` 调整。
+核心原则是：学校网页/API决定现实状态，本地数据库负责记忆和安全控制。数据库不能单独证明远端预约成功或已经入馆。
 
-直接运行动态监控：
+### 基础预约
 
-```powershell
-# 演练：只读取本地演练状态，不提交或取消真实预约
-.\.venv\Scripts\python.exe -m scripts.run_dynamic_monitor --date "2026-08-28" --dry-run
+- 手动预约支持预览、确认提交、真实提交和结果核验。
+- 自动预约由 Windows 计划任务触发，每个账号每次最多执行一个预约任务。
+- 选座支持随机空闲座位、指定楼层和具体座位优先。
+- 同一账号同一时刻只允许一个有效预约；本地和远端都会在提交前检查。
+- 每日成功预约和动态取消默认各限制 15 次。
+- 成功、失败和结果不明确都会写入本地数据库；预约结果可通过企业微信 Webhook 推送。
 
-# 真实运行：读取“我的预约”，并按配置执行迟到补偿
-.\.venv\Scripts\python.exe -m scripts.run_dynamic_monitor --date "2026-08-28"
-```
+### 初始化和静态预约
 
-安全默认配置位于 `.env`：
+初始化会验证登录、座位系统首页和“我的预约”，并把图书馆、阅览室、座位偏好和学习窗口写入 `accounts.json`。验证结果写入 SQLite 的 `account_initialization` 表。
 
-```dotenv
-SEAT_DRY_RUN=true
-SEAT_WECOM_WEBHOOK=
-SEAT_WECOM_BOT_ID=
-SEAT_WECOM_BOT_SECRET=
-SEAT_WECOM_BOT_WS_URL=wss://openws.work.weixin.qq.com
-SEAT_WECOM_BOT_DEFAULT_USER=
-SEAT_WECOM_BOT_LOCK_FILE=logs/wecom-bot.lock
-SEAT_WECOM_BOT_OUTBOX_DIR=logs/wecom-bot-outbox
-```
+静态自动预约按上午、下午、晚上等配置时段运行。任务使用无头浏览器，不需要一直打开可见页面，但 Windows 用户会话、网络和 Chrome 必须可用。
 
-`SEAT_DRY_RUN=true` 影响本地服务和相关演练配置；手动 `preview_reservation.py` 是否提交以 `--submit` 为准；静默任务是否演练以安装时的 `-DryRun` 为准。
+### 动态窗口补偿
 
-账号密码、Webhook、Cookie、浏览器目录、数据库和日志只保存在本机。
+动态监控使用一个共享进程处理启用时段，默认最多 3 个时段。以预约开始时间为锚点：
 
-### 5. 企业微信智能机器人长连接
+- 动态窗口覆盖签到窗口前 30 分钟至签到窗口结束后 90 分钟。
+- 临近边界提前 2 分钟检查。
+- 迟到时每 30 分钟取消原预约，并按“当前”重新预约至原结束时间。
+- 动态窗口结束前仍未判断为入馆，取消当前预约，避免形成失约。
+- 早于签到窗口入馆时，按当前时间重约一次，然后停止该时段的动态调整。
+- “我的预约”中的 `RESERVE`、`CHECK_IN`、`COMPLETE` 等状态会分别归一为已预约、履约中、已履约。
+- `awayBegin` 和 `awayEnd` 用于暂离保护：普通时段最长 30 分钟，餐时最长 90 分钟；若暂离截止时间早于预约结束时间，在截止前 2 分钟取消，避免暂离超时违约。
 
-企业微信智能机器人长连接使用官方 `wecom-aibot-sdk`，是独立常驻进程，不会改变现有预约服务和 Windows 定时任务。先在 `.env` 配置机器人参数：
+正常查询默认每 180 秒一次，临近动作边界提高到每 120 秒一次。认证失效会关闭旧会话、重建独立会话并指数退避；连续失败后进入安全保持，不自动取消预约。
 
-```dotenv
-SEAT_WECOM_BOT_ID=企业微信智能机器人 Bot ID
-SEAT_WECOM_BOT_SECRET=企业微信智能机器人 Secret
-SEAT_WECOM_BOT_WS_URL=wss://openws.work.weixin.qq.com
-SEAT_WECOM_BOT_LOCK_FILE=logs/wecom-bot.lock
-```
+### 企业微信双向交互
 
-项目要求 Python 3.11+，安装项目依赖时会同时安装 `wecom-aibot-sdk` 及其依赖。每个需要接收一对一消息的账号，在 `accounts.json` 中填写企业微信用户 ID：
+机器人通过官方长连接接收消息，通过账号绑定的 `wecom_user_id` 做权限校验。控制命令先写入 SQLite 的 `bot_commands` 队列，再由动态监控执行并回传结果。
 
-如果 `.env` 中缺少 `SEAT_WECOM_BOT_ID` 或 `SEAT_WECOM_BOT_SECRET`，机器人功能视为关闭：机器人任务正常退出，不影响预约和 Webhook 通知，也不会写入机器人投递箱。
-
-```json
-{
-  "id": "account03",
-  "wecom_user_id": "企业微信 userid",
-  "wecom_aliases": ["张三", "zs"]
-}
-```
-
-再在 `accounts.json` 中给账号配置一对一接收人和别名：
-
-```json
-"wecom_user_id": "企业微信用户 ID",
-
-"wecom_aliases": ["account03", "张三"]
-```
-
-启动长连接机器人：
-
-```powershell
-.\.venv\Scripts\python.exe scripts/run_wecom_bot.py
-```
-
-当前支持的推文命令：
-
-```text
-推文 account03 标题 | https://example.test/a
-推文 @张三 标题 | https://example.test/a | 备注
-```
-
-手机控制命令也会路由到现有预约服务。只允许 `accounts.json` 中配置的 `wecom_user_id` 发起控制命令：
+当前远程控制命令：
 
 ```text
 今天不去了
@@ -434,41 +199,48 @@ SEAT_WECOM_BOT_LOCK_FILE=logs/wecom-bot.lock
 状态
 ```
 
-机器人收到控制命令后会立即回复“已收到”，并写入该账号现有的 SQLite 数据库；动态监控在下一轮查询时关闭浏览器读取会话，再执行已有的取消或状态逻辑。执行结果通过机器人投递箱回传，通常延迟约 2-3 分钟。重复消息按企业微信请求 ID 去重，未配置的发送人不会进入执行队列。
+机器人负责接收、去重和回复；动态监控负责真正取消预约或读取状态。未绑定发送人不能执行控制命令，机器人断线会自动重连。
 
-启动后，官方 SDK 负责鉴权、心跳和断线重连；项目负责消息去重、命令解析和账号路由。预约程序会同时发送 Webhook 群卡片，并按账号写入 `SEAT_WECOM_BOT_OUTBOX_DIR` 投递箱；运行中的机器人自动读取投递箱，通过 SDK 的 `send_message(chatid=user_id, ...)` 把同一张卡片发给对应账号，成功后删除投递文件。两条命令之间不依赖 Webhook 群消息回流。
+## 手动预约边界
 
-验证方式：
+如果预约是通过学校网页或微信小程序完成，而不是通过本项目的预约流程完成：
 
-```powershell
-\.venv\Scripts\python.exe -m pytest tests/test_wecom_sdk_dependency.py tests/test_wecom_official_sdk_adapter.py tests/test_wecom_bot.py tests/test_wecom_bot_send.py -q
-\.venv\Scripts\python.exe -m scripts.run_wecom_bot
-```
+- 学校系统中的预约和签到本身不受影响。
+- 本地数据库没有预约记录，动态监控通常会判断为无可监测预约并退出。
+- 迟到重约、早到重约、动态窗口末端取消和暂离超时取消不会可靠执行。
+- 企业微信“状态”可能看不到这条预约；取消命令也可能无法安全定位远端预约，因此不要依赖机器人取消外部手动预约。
+- 本地成功预约次数、动态取消次数、座位和时间留档不会自动同步。
 
-第一条命令只做本地验证，不会连接企业微信。第二条命令需要已配置真实 Bot ID、Secret，并保持进程运行；在企业微信中发送 `推文 account03 标题 | https://example.test/a`，机器人应向 `account03` 对应的 `wecom_user_id` 发送一条 Markdown 消息。验证手机控制时，先确保动态监控进程正在运行，再发送 `今天不去了`：机器人应立即回复已收到，约下一轮监控后收到执行结果；同时可检查账号数据库中的 `bot_commands` 表，确认该请求从 `pending` 变为 `completed` 或 `failed`。停止服务使用 `Ctrl+C`。不要把 `.env` 或 `accounts.json` 内容发到日志或聊天中。
+最稳妥的方式是使用项目的手动预约流程：浏览器操作仍可人工确认，但程序会同时完成远端核验、数据库记录、通知和动态监控接入。
 
-## 常用辅助命令
+## 配置与安全
 
-```powershell
-# 重置某个账号当天的本地预约状态，恢复为“未执行”
-# 只清理 reservations、successful_bookings、scheduler_runs
-# 不会删除初始化状态、座位偏好、时间窗口和默认到馆时间
-.\.venv\Scripts\python.exe scripts/reset_day.py `
-  --account account03 `
-  --date "2026-08-22" `
-  --yes
+重要配置：
 
-# 重新采集指定阅览室的结束时间
-.\.venv\Scripts\python.exe scripts/capture_end_times.py `
-  --account account03 `
-  --room "5层自然科学借阅区" `
-  --date "2026-08-22"
+| 配置 | 默认值 | 作用 |
+|---|---:|---|
+| `SEAT_DRY_RUN` | `true` | 本地服务默认不提交真实预约 |
+| `SEAT_DAILY_SUCCESS_LIMIT` | `15` | 每日成功预约上限 |
+| `SEAT_MAX_CANCEL_PER_DAY` | `15` | 每日动态取消上限 |
+| `SEAT_DYNAMIC_BEFORE_MINUTES` | `30` | 动态窗口提前范围 |
+| `SEAT_DYNAMIC_AFTER_MINUTES` | `90` | 动态窗口延后范围 |
+| `SEAT_DYNAMIC_LATE_RESCHEDULE_MINUTES` | `30` | 迟到重约颗粒度 |
+| `SEAT_DYNAMIC_MAX_PERIODS` | `3` | 动态补偿最多启用时段数 |
 
-# 查看命令帮助
-.\.venv\Scripts\python.exe scripts/preview_reservation.py --help
+真实预约前确认：
 
-# 自动化测试
-.\.venv\Scripts\python.exe -m pytest -q --basetemp .pytest-tmp
-```
+1. `.env`、`accounts.json`、数据库、浏览器资料和日志没有加入 Git。
+2. `SEAT_DRY_RUN`、计划任务的 `-DryRun` 和手动预约的 `--submit` 是三套独立开关。
+3. 认证失败、接口返回不明确或无法唯一匹配记录时，程序会保留预约并停止危险操作。
+4. 运行动态监控时不要同时启动第二个同账号监控进程。
 
-真实网站流程仍依赖校园网络、登录状态、验证码和页面结构；本地测试不能替代真实预约窗口中的预览验证。
+## 故障排查
+
+- `ModuleNotFoundError`：确认当前目录是项目根目录，并使用 `\.venv\Scripts\python.exe` 启动；必要时重新执行依赖安装命令。
+- 登录失败或验证码失败：先运行 `scripts\test_login.py`，再运行 `scripts\diagnose_login.py` 查看页面状态。
+- 动态监控显示 `idle`：检查本地数据库是否有当天 `reserved` 记录；外部手动预约不会自动进入本地动态会话。
+- 动态监控显示 `error_hold` 或 `safe_hold`：查看动态日志，程序通常会保留当前预约，不要立刻启动第二个实例。
+- 早到无法识别：检查 `SEAT_ACCESS_RECORDS_URL` 是否为已校准地址，并确认浏览器页面能读取激活码和门禁记录。
+- 企业微信命令无结果：确认机器人进程和动态监控都在运行，发送人已绑定到对应账号，且账号数据库中的 `bot_commands` 状态已处理。
+
+真实网站依赖校园网络、账号权限、验证码和页面/API结构；本地测试不能替代真实预约窗口中的人工确认。
