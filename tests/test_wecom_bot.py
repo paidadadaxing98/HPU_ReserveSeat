@@ -68,6 +68,60 @@ def test_account_resolver_finds_account_by_alias_and_user_id(tmp_path):
     assert recipient.user_id == "user-a"
 
 
+def test_router_authorized_control_command_is_queued_for_account(tmp_path):
+    accounts = [
+        AccountSettings(
+            id="account01",
+            account="1001",
+            password="secret",
+            profile_path=tmp_path / "profile",
+            db_path=tmp_path / "db.sqlite",
+            wecom_user_id="user-a",
+        )
+    ]
+    queued = []
+    replies = []
+    router = WeComCommandRouter(
+        AccountRecipientResolver(accounts),
+        send_to_user=lambda user_id, text: True,
+        reply=lambda message, text: replies.append(text) or True,
+        command_submitter=lambda account_id, request_id, sender, text: queued.append(
+            (account_id, request_id, sender, text)
+        ) or True,
+    )
+
+    message = WeComBotMessage("msg-1", "req-1", "user-a", "今天不去了")
+
+    assert router.handle(message) is True
+    assert queued == [("account01", "req-1", "user-a", "今天不去了")]
+    assert replies == ["已收到命令：今天不去了。动态监控将在下一轮执行。"]
+
+
+def test_router_rejects_control_command_from_unconfigured_sender(tmp_path):
+    accounts = [
+        AccountSettings(
+            id="account01",
+            account="1001",
+            password="secret",
+            profile_path=tmp_path / "profile",
+            db_path=tmp_path / "db.sqlite",
+            wecom_user_id="user-a",
+        )
+    ]
+    queued = []
+    replies = []
+    router = WeComCommandRouter(
+        AccountRecipientResolver(accounts),
+        send_to_user=lambda user_id, text: True,
+        reply=lambda message, text: replies.append(text) or True,
+        command_submitter=lambda *args: queued.append(args) or True,
+    )
+
+    assert router.handle(WeComBotMessage("msg-2", "req-2", "user-b", "今天不去了")) is False
+    assert queued == []
+    assert replies == ["没有权限执行座位控制命令。"]
+
+
 def test_router_sends_push_tweet_to_resolved_user(tmp_path):
     accounts = [
         AccountSettings(

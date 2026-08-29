@@ -249,7 +249,13 @@ def find_reservation_record(records: list[dict], day: str, expected: dict) -> di
         and _extract_date(item) == day
         and _reservation_matches_expected(item, expected)
     ]
-    return matches[0] if len(matches) == 1 else None
+    if len(matches) == 1:
+        return matches[0]
+    live_matches = [
+        item for item in matches
+        if reservation_state(item) in {"reserved", "in_use"}
+    ]
+    return live_matches[0] if len(live_matches) == 1 else None
 
 
 def find_reservation_state(records: list[dict], day: str, expected: dict) -> str | None:
@@ -453,7 +459,11 @@ def _extract_seat(item: dict) -> str:
         if normalized:
             return normalized
     for key in ("location", "loc"):
-        match = re.search(r"(?:座位号|座位|seat)\s*([0-9A-Za-z-]+)", _value_text(item.get(key)), re.IGNORECASE)
+        text = _value_text(item.get(key))
+        match = re.search(r"(?:座位号|座位|seat)\s*([0-9A-Za-z-]+)", text, re.IGNORECASE)
+        if match:
+            return _normalize_seat(match.group(1))
+        match = re.search(r"([0-9]+)\s*号\s*$", text)
         if match:
             return _normalize_seat(match.group(1))
     return ""

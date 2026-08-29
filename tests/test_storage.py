@@ -55,6 +55,28 @@ def test_repository_persists_default_override_and_command_response(tmp_path):
     assert json.loads(stored["response"]) == response
 
 
+def test_repository_queues_bot_command_idempotently_and_completes_it(tmp_path):
+    repo = Repository(str(tmp_path / "assistant.sqlite"), account_id="alice")
+
+    assert repo.enqueue_bot_command("2026-08-29", "msg-1", "user-a", "今天不去了") is True
+    assert repo.enqueue_bot_command("2026-08-29", "msg-1", "user-a", "今天不去了") is False
+    pending = repo.pending_bot_commands("2026-08-29")
+    assert len(pending) == 1
+    assert pending[0]["request_id"] == "msg-1"
+    assert pending[0]["sender"] == "user-a"
+    assert pending[0]["text"] == "今天不去了"
+
+    assert repo.claim_bot_command("msg-1") is True
+    assert repo.claim_bot_command("msg-1") is False
+    response = {"ok": True, "message": "已取消指定预约。"}
+    repo.complete_bot_command("msg-1", "completed", response)
+
+    stored = repo.get_bot_command("msg-1")
+    assert stored["status"] == "completed"
+    assert json.loads(stored["response"]) == response
+    assert repo.pending_bot_commands("2026-08-29") == []
+
+
 def test_repository_records_scheduler_run_and_events(tmp_path):
     repo = Repository(str(tmp_path / "assistant.sqlite"))
     assert repo.scheduler_run("2026-08-21") is None
@@ -67,6 +89,23 @@ def test_repository_records_scheduler_run_and_events(tmp_path):
 
     repo.event("arrival", "morning", "09:05")
     assert repo.events("arrival", "morning") == ["09:05"]
+
+
+def test_learned_default_ignores_delay_samples(tmp_path):
+    repo = Repository(str(tmp_path / "assistant.sqlite"))
+    repo.event("delay", "morning", "10:00")
+    repo.event("delay", "morning", "10:39")
+    repo.event("arrival", "morning", "09:32")
+
+    assert repo.samples("morning") == ["09:32"]
+    assert repo.learned_default("morning", "09:00") == "09:32"
+
+
+def test_learned_default_uses_static_fallback_without_arrival_samples(tmp_path):
+    repo = Repository(str(tmp_path / "assistant.sqlite"))
+    repo.event("delay", "morning", "10:00")
+
+    assert repo.learned_default("morning", "09:00") == "09:00"
 
 
 def test_repository_tracks_successes_per_account_and_date_idempotently(tmp_path):
@@ -88,6 +127,68 @@ def test_repository_success_count_does_not_include_failed_or_uncertain_records(t
     repo.save_reservation("2026-08-21", "afternoon", "uncertain", "15:00", "17:00")
 
     assert repo.successful_booking_count("2026-08-21") == 0
+
+
+def test_repository_persists_dynamic_session_across_repository_instances(tmp_path):
+    database = tmp_path / "assistant.sqlite"
+    repo = Repository(str(database), account_id="alice")
+    repo.save_dynamic_session(
+        "2026-08-21",
+        "morning",
+        "2026-08-21T08:00:00",
+        "2026-08-21T12:00:00",
+        "2026-08-21T07:00:00",
+        "2026-08-21T09:45:00",
+    )
+    repo.update_dynamic_session(
+        "2026-08-21",
+        "morning",
+        action_index=1,
+        last_action_at="2026-08-21T08:13:00",
+        message="已完成一次动态重约",
+    )
+
+    reopened = Repository(str(database), account_id="alice")
+
+    assert reopened.get_dynamic_session("2026-08-21", "morning") == {
+        "date": "2026-08-21",
+        "period": "morning",
+        "anchor_start": "2026-08-21T08:00:00",
+        "anchor_end": "2026-08-21T12:00:00",
+        "window_start": "2026-08-21T07:00:00",
+        "window_end": "2026-08-21T09:45:00",
+        "status": "monitoring",
+        "action_index": 1,
+        "entered_at": None,
+        "cancel_count": 0,
+        "last_action_at": "2026-08-21T08:13:00",
+        "last_checked_at": None,
+        "message": "已完成一次动态重约",
+    }
+
+
+def test_repository_counts_dynamic_cancellations_idempotently_per_day_and_account(tmp_path):
+    database = tmp_path / "assistant.sqlite"
+    repo = Repository(str(database), account_id="alice")
+
+    assert repo.record_dynamic_cancellation("2026-08-21", "morning:08:13") is True
+    assert repo.record_dynamic_cancellation("2026-08-21", "morning:08:13") is False
+    assert repo.record_dynamic_cancellation("2026-08-21", "morning:08:43") is True
+    assert repo.dynamic_cancellation_count("2026-08-21") == 2
+
+    other = Repository(str(database), account_id="bob")
+    assert other.dynamic_cancellation_count("2026-08-21") == 0
+
+
+def test_repository_detects_existing_dynamic_cancellation_by_operation_key(tmp_path):
+    database = tmp_path / "assistant.sqlite"
+    repo = Repository(str(database), account_id="alice")
+
+    assert repo.has_dynamic_cancellation("2026-08-21", "morning:08:13") is False
+    assert repo.record_dynamic_cancellation("2026-08-21", "morning:08:13") is True
+    assert repo.has_dynamic_cancellation("2026-08-21", "morning:08:13") is True
+    other = Repository(str(database), account_id="bob")
+    assert other.has_dynamic_cancellation("2026-08-21", "morning:08:13") is False
 
 
 def test_repository_reset_day_clears_booking_state_but_keeps_configuration(tmp_path):

@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 from seat_assistant.reservation import SeatResult
-from scripts.preview_reservation import close_success_dialog, close_time_dialog, daily_reservation_details, fetch_post_submit_reservations, fetch_user_reservations, fetch_user_reservations_with_capabilities, pause_for_manual_interaction, reservation_summary, reservation_verification_delay, reservation_verification_status, send_preview_notification, submission_notice
+from scripts.preview_reservation import _click_cancel_for_record, close_success_dialog, close_time_dialog, daily_reservation_details, fetch_post_submit_reservations, fetch_user_reservations, fetch_user_reservations_with_capabilities, pause_for_manual_interaction, reservation_summary, reservation_verification_delay, reservation_verification_status, send_preview_notification, submission_notice
 
 
 def test_preview_notification_uses_manual_booking_context():
@@ -26,6 +26,63 @@ def test_preview_notification_uses_manual_booking_context():
     assert "**15:00 — 17:00**" in notifier.messages[0]
     assert "网页核验成功" in notifier.messages[0]
     assert "| 💺 **座位** | **169** |" in notifier.messages[0]
+
+
+def test_cancel_locator_clicks_the_sites_order_state_cancel_element():
+    class EmptyActions:
+        async def count(self):
+            return 0
+
+        def filter(self, **kwargs):
+            return self
+
+    class CancelAction:
+        def __init__(self):
+            self.clicked = False
+            self.last = self
+
+        async def count(self):
+            return 1
+
+        def filter(self, **kwargs):
+            return self
+
+        async def click(self):
+            self.clicked = True
+
+    class Row:
+        def __init__(self, action):
+            self.action = action
+
+        async def inner_text(self):
+            return "2026-8-29 10:00 12:00 座位163 取消"
+
+        def locator(self, selector):
+            return self.action if "order-state-cancel" in selector else EmptyActions()
+
+    class Page:
+        def __init__(self):
+            self.action = CancelAction()
+            self.row = Row(self.action)
+
+        def locator(self, selector):
+            if selector.startswith("tr,"):
+                return self
+            return EmptyActions()
+
+        async def count(self):
+            return 1
+
+        def nth(self, index):
+            return self.row
+
+    page = Page()
+
+    assert asyncio.run(_click_cancel_for_record(
+        page,
+        {"begin": "10:00", "end": "12:00", "stat": "RESERVE"},
+    )) is True
+    assert page.action.clicked is True
 
 
 def test_preview_notification_can_be_suppressed_for_unattended_booking():
@@ -70,10 +127,12 @@ def test_fetch_user_reservations_reads_paginated_history_endpoint():
 
         async def evaluate(self, script, payload):
             self.endpoints.append(payload["endpoint"])
-            if "/history/1/100?" in payload["endpoint"]:
+            if "/history/1/100?page=1&pageSize=100&" in payload["endpoint"]:
                 return {"status": 200, "body": {"code": 0, "data": {"reservations": first_page, "count": "101"}}}
-            if "/history/2/100?" in payload["endpoint"]:
+            if "/history/2/100?page=2&pageSize=100&" in payload["endpoint"]:
                 return {"status": 200, "body": {"code": 0, "data": {"reservations": second_page, "count": "101"}}}
+            if "/history/1/6?page=1&pageSize=6&" in payload["endpoint"]:
+                return {"status": 200, "body": {"code": 0, "data": []}}
             if "/user/reservations?" in payload["endpoint"]:
                 return {"status": 200, "body": {"code": 0, "data": []}}
             raise AssertionError(f"unexpected endpoint: {payload['endpoint']}")
@@ -86,8 +145,9 @@ def test_fetch_user_reservations_reads_paginated_history_endpoint():
 
     assert len(reservations) == 101
     assert page.endpoints == [
-        "/rest/v2/history/1/100?token=token",
-        "/rest/v2/history/2/100?token=token",
+        "/rest/v2/history/1/100?page=1&pageSize=100&token=token",
+        "/rest/v2/history/2/100?page=2&pageSize=100&token=token",
+        "/rest/v2/history/1/6?page=1&pageSize=6&token=token",
         "/rest/v2/user/reservations?token=token",
     ]
 
@@ -140,9 +200,10 @@ def test_fetch_user_reservations_uses_total_count_even_when_page_is_short():
     page = Page()
     assert asyncio.run(fetch_user_reservations(page, {"headers": {"authorization": "x"}, "token": "token"})) == records
     assert page.endpoints == [
-        "/rest/v2/history/1/100?token=token",
-        "/rest/v2/history/2/100?token=token",
-        "/rest/v2/user/reservations?token=token",
+        "/rest/v2/history/1/100?page=1&pageSize=100&token=token",
+        "/rest/v2/history/2/100?page=2&pageSize=100&token=token",
+        "/rest/v2/history/1/6?page=1&pageSize=6&token=token",
+        "/rest/v2/history/2/6?page=2&pageSize=6&token=token",
     ]
 
 
@@ -157,8 +218,10 @@ def test_fetch_user_reservations_merges_current_reservation_fallback():
         async def evaluate(self, script, payload):
             endpoint = payload["endpoint"]
             self.endpoints.append(endpoint)
-            if "/history/1/100?" in endpoint:
+            if "/history/1/100?page=1&pageSize=100&" in endpoint:
                 return {"status": 200, "body": {"code": 0, "data": {"records": [cancelled], "totalCount": 1}}}
+            if "/history/1/6?page=1&pageSize=6&" in endpoint:
+                return {"status": 200, "body": {"code": 0, "data": {"records": [reserved], "totalCount": 1}}}
             if "/user/reservations?" in endpoint:
                 return {"status": 200, "body": {"code": 0, "data": [reserved]}}
             raise AssertionError(f"unexpected endpoint: {endpoint}")
@@ -168,7 +231,7 @@ def test_fetch_user_reservations_merges_current_reservation_fallback():
 
     page = Page()
     assert asyncio.run(fetch_user_reservations(page, {"headers": {"authorization": "x"}, "token": "token"})) == [cancelled, reserved]
-    assert any("/user/reservations?" in endpoint for endpoint in page.endpoints)
+    assert any("/history/1/6?page=1&pageSize=6&" in endpoint for endpoint in page.endpoints)
 
 
 def test_fetch_user_reservations_falls_back_to_current_endpoint():
@@ -199,7 +262,8 @@ def test_fetch_user_reservations_falls_back_to_current_endpoint():
     page = Page()
     assert asyncio.run(fetch_user_reservations(page, {"headers": {"authorization": "x"}, "token": "token"})) == [record]
     assert page.endpoints == [
-        "/rest/v2/history/1/100?token=token",
+        "/rest/v2/history/1/100?page=1&pageSize=100&token=token",
+        "/rest/v2/history/1/6?page=1&pageSize=6&token=token",
         "/rest/v2/user/reservations?token=token",
     ]
 
@@ -274,7 +338,7 @@ def test_post_submit_poll_reads_only_current_reservations_endpoint():
 
     page = Page()
     assert asyncio.run(fetch_post_submit_reservations(page, {"headers": {"authorization": "x"}, "token": "token"})) == [record]
-    assert page.endpoints == ["/rest/v2/user/reservations?token=token"]
+    assert page.endpoints == ["/rest/v2/history/1/6?page=1&pageSize=6&token=token"]
 
 
 def test_fetch_user_reservations_falls_back_when_history_endpoint_fails():
@@ -319,7 +383,8 @@ def test_fetch_user_reservations_falls_back_to_current_endpoint_when_history_is_
     page = Page()
     assert asyncio.run(fetch_user_reservations(page, {"headers": {"authorization": "x"}, "token": "token"})) == [record]
     assert page.endpoints == [
-        "/rest/v2/history/1/100?token=token",
+        "/rest/v2/history/1/100?page=1&pageSize=100&token=token",
+        "/rest/v2/history/1/6?page=1&pageSize=6&token=token",
         "/rest/v2/user/reservations?token=token",
     ]
 
@@ -419,6 +484,29 @@ def test_reservation_verification_uses_unique_time_match_when_location_fields_mi
     assert record["begin"] == "09:00"
     assert "时间匹配" in message
     assert "当天全部预约" not in message
+
+
+def test_reservation_verification_accepts_actual_start_time_for_current_option():
+    status, record, message = reservation_verification_status(
+        [{
+            "date": "2026-08-20",
+            "loc": "4层计算机类借阅区，座位号169",
+            "begin": "08:13",
+            "end": "12:00",
+            "stat": "RESERVE",
+        }],
+        "预约成功",
+        "2026-08-20",
+        "4层计算机类借阅区",
+        "169",
+        "现在",
+        "12:00",
+        submission_signal=("success", "预约成功"),
+    )
+
+    assert status == "success"
+    assert record["begin"] == "08:13"
+    assert "当前" in message
 
 
 def test_reservation_verification_reports_submitted_pending_when_success_has_no_record():

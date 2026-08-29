@@ -52,7 +52,7 @@ class DynamicMonitor:
         entry_at = first_entry_time(records or [], day)
         results = {"commands": command_results} if command_results else {}
         for period_name, _period in enabled:
-            session = self._ensure_session(day, period_name)
+            session = self._ensure_session(day, period_name, now)
             if session is None:
                 continue
             if session["status"] not in {"monitoring", "entered"}:
@@ -235,8 +235,9 @@ class DynamicMonitor:
         if not self.settings.dynamic_compensation_enabled or len(enabled) > self.settings.dynamic_max_periods:
             return {"status": "disabled"}
         sessions = {}
+        now = datetime.now()
         for period_name in enabled:
-            session = self._ensure_session(day, period_name)
+            session = self._ensure_session(day, period_name, now)
             if session is not None:
                 sessions[period_name] = session["status"]
         return sessions
@@ -377,15 +378,32 @@ class DynamicMonitor:
             self.settings.dynamic_boundary_lead_minutes,
         ), away_begin
 
-    def _ensure_session(self, day: str, period_name: str):
+    def _ensure_session(self, day: str, period_name: str, now: datetime | None = None):
+        now = now or datetime.now()
         session = self.service.repo.get_dynamic_session(day, period_name)
         if session is not None:
-            return session
+            if session["status"] in {"monitoring", "entered"}:
+                return session
         record = self.service.repo.get_reservation(day, period_name)
+        if not record or record["status"] != "reserved":
+            manual = self.service.repo.get_reservation(day, "manual")
+            if self._manual_period_for_record(day, manual, now) == period_name:
+                record = self._adopt_manual_reservation(day, period_name, manual)
+                session = None
+        if session is not None:
+            return session
         if not record or record["status"] != "reserved":
             return None
         try:
-            anchor_start = datetime.combine(date.fromisoformat(day), parse_hhmm(record["start"]))
+            target_day = date.fromisoformat(day)
+            try:
+                start_time = parse_hhmm(record["start"])
+            except (TypeError, ValueError):
+                start_value = str(record.get("start") or "").strip()
+                if target_day != now.date() or start_value.lower() not in {"now", "current"} and start_value not in {"当前", "现在"}:
+                    raise
+                start_time = now.time().replace(second=0, microsecond=0)
+            anchor_start = datetime.combine(target_day, start_time)
             anchor_end = datetime.combine(date.fromisoformat(day), parse_hhmm(record["end"]))
         except (TypeError, ValueError):
             self.service.repo.save_dynamic_session(
@@ -406,6 +424,74 @@ class DynamicMonitor:
             window_end.isoformat(timespec="seconds"),
         )
         return self.service.repo.get_dynamic_session(day, period_name)
+
+    def _manual_period_for_record(self, day: str, record: dict | None, now: datetime) -> str | None:
+        """Map one successful manual booking to its configured study period."""
+        if not record or record.get("status") != "reserved":
+            return None
+        try:
+            target_day = date.fromisoformat(day)
+            end = parse_hhmm(record.get("end"))
+        except (TypeError, ValueError):
+            return None
+        start_value = str(record.get("start") or "").strip()
+        try:
+            start = parse_hhmm(start_value)
+        except (TypeError, ValueError):
+            if start_value.lower() not in {"now", "current"} and start_value not in {"当前", "现在"}:
+                return None
+            if now.date() != target_day:
+                return None
+            start = now.time().replace(second=0, microsecond=0)
+
+        candidates = []
+        for name, period in self.settings.periods.items():
+            if not getattr(period, "enabled", True):
+                continue
+            try:
+                arrival_start = parse_hhmm(period.arrival_window[0])
+                arrival_end = parse_hhmm(period.arrival_window[1])
+                period_end = parse_hhmm(period.departure_window[0])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if end != period_end or start >= end:
+                continue
+            if arrival_start <= start < arrival_end:
+                score = 2
+            elif start < arrival_end and end > arrival_start:
+                score = 1
+            else:
+                continue
+            candidates.append((score, name))
+        if not candidates:
+            return None
+        best_score = max(score for score, _name in candidates)
+        best = [name for score, name in candidates if score == best_score]
+        return best[0] if len(best) == 1 else None
+
+    def _adopt_manual_reservation(self, day: str, period_name: str, record: dict) -> dict:
+        """Transfer a manual booking into the period state used by monitoring."""
+        self.service.repo.save_reservation(
+            day,
+            period_name,
+            "reserved",
+            record["start"],
+            record["end"],
+            record.get("room", ""),
+            record.get("seat", ""),
+            "已将手动预约自动纳入动态监控",
+        )
+        self.service.repo.save_reservation(
+            day,
+            "manual",
+            "cancelled",
+            record["start"],
+            record["end"],
+            record.get("room", ""),
+            record.get("seat", ""),
+            "已自动归入" + period_name + "动态监控",
+        )
+        return self.service.repo.get_reservation(day, period_name)
 
 
 def _format_bot_command_result(command_text: str, response: dict) -> str:

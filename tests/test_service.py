@@ -91,12 +91,27 @@ def test_reserve_period_does_not_retry_an_uncertain_same_day_booking(tmp_path):
     service, repo = make_service(tmp_path, adapter)
 
     first = service.reserve_period("2026-08-21", "evening")
-    second = service.reserve_period("2026-08-21", "afternoon")
+    second = service.reserve_period("2026-08-21", "evening")
 
     assert first.conclusive is False
     assert second.conclusive is False
     assert "不明确" in second.message
     assert len(adapter.reserve_calls) == 1
+
+
+def test_uncertain_previous_period_does_not_block_next_period(tmp_path):
+    adapter = FakeAdapter()
+    service, repo = make_service(tmp_path, adapter)
+    repo.save_reservation(
+        "2026-08-21", "afternoon", "uncertain", "15:00", "18:30", message="提交结果不明确"
+    )
+
+    result = service.reserve_period(
+        "2026-08-21", "evening", now=datetime(2026, 8, 21, 19, 0)
+    )
+
+    assert result.success is True
+    assert adapter.reserve_calls == [("2026-08-21", "evening", "20:00", "22:00")]
 
 
 def test_cancel_does_not_mark_reservation_cancelled_when_result_is_uncertain(tmp_path):

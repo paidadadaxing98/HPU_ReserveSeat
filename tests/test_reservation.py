@@ -39,6 +39,20 @@ def test_real_adapter_delegates_to_async_booking_runner():
     assert result.seat == "169"
 
 
+def test_real_adapter_delegates_to_async_cancellation_runner():
+    async def cancel_runner(settings, day, period):
+        assert settings.account_id == "alice"
+        return SeatResult(True, "阅览室", "169", "取消成功")
+
+    settings = type("Settings", (), {"account_id": "alice"})()
+    result = PlaywrightReservation(settings=settings, cancel_runner=cancel_runner).cancel(
+        "2026-08-22", "morning"
+    )
+
+    assert result.success is True
+    assert result.message == "取消成功"
+
+
 def test_real_adapter_delegates_current_reservation_query_to_async_runner():
     async def current_runner(settings, day):
         assert settings.account_id == "alice"

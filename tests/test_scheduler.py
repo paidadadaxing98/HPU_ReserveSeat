@@ -204,6 +204,21 @@ def test_run_once_preserves_uncertain_period_details_saved_by_service(tmp_path):
     )
 
 
+def test_run_once_continues_to_next_period_after_uncertain_previous_period(tmp_path):
+    adapter = SchedulerAdapter()
+    repo = Repository(str(tmp_path / "db.sqlite"))
+    service = AssistantService(Settings(control_token="local-token"), repo, adapter)
+    repo.save_reservation(
+        "2026-08-21", "afternoon", "uncertain", "15:00", "18:30", message="提交结果不明确"
+    )
+
+    result = run_once(service, "2026-08-21", now=datetime(2026, 8, 21, 19, 0))
+
+    assert result["afternoon"]["status"] == "uncertain"
+    assert result["evening"]["status"] == "reserved"
+    assert [call[1] for call in adapter.reserve_calls] == ["evening"]
+
+
 def test_run_once_is_not_completed_when_any_enabled_period_failed(tmp_path):
     adapter = SchedulerAdapter()
     settings = Settings(control_token="local-token")

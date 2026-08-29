@@ -1,6 +1,7 @@
 from datetime import datetime
 
-from seat_assistant.submission import active_reservations_for_day, blocking_active_reservations_for_day, confirmation_required, day_reservations, end_time_response_matches_start, end_times_request_url, end_times_response_matches, find_matching_reservation, find_reservation_by_day_and_time, find_similar_reservation, history_page_records, local_reservation_blocks_retry, normalize_time_option, reservation_matches, requested_times_available, submission_settled, time_option_id, time_options, time_to_minutes, time_values
+import seat_assistant.submission as submission
+from seat_assistant.submission import active_reservations_for_day, blocking_active_reservations_for_day, confirmation_required, day_reservations, end_time_response_matches_start, end_times_request_url, end_times_response_matches, find_matching_reservation, find_reservation_by_day_and_time, find_reservation_record, find_reservation_state, find_similar_reservation, history_page_records, local_reservation_blocks_retry, normalize_time_option, reservation_matches, reservation_state, requested_times_available, submission_settled, time_option_id, time_options, time_to_minutes, time_values, validate_half_hour_time
 
 
 def test_submission_only_prompts_for_explicit_debug_confirmation():
@@ -52,6 +53,12 @@ def test_time_options_preserve_native_server_ids():
     assert time_options(response, "startTimes") == [{"id": "now", "value": "现在"}, {"id": "540", "value": "09:00"}]
     assert time_option_id(response, "startTimes", "09:00") == "540"
     assert time_option_id(response, "startTimes", "现在") == "now"
+
+
+def test_current_start_option_is_accepted_as_a_dynamic_booking_start():
+    assert normalize_time_option("当前") == "现在"
+    assert normalize_time_option(" now ") == "现在"
+    assert validate_half_hour_time("当前") == "现在"
 
 
 def test_end_times_request_url_can_use_native_start_id():
@@ -335,6 +342,19 @@ def test_blocking_active_reservations_keeps_missing_end_time_for_safety():
     ) == [record]
 
 
+def test_blocking_cancelable_reservations_includes_unfinished_check_in():
+    record = {
+        "date": "2026-08-20",
+        "begin": "20:00",
+        "end": "22:00",
+        "stat": "CHECK_IN",
+    }
+    helper = getattr(submission, "blocking_cancelable_reservations_for_day", None)
+
+    assert helper is not None
+    assert helper([record], "2026-08-20", now=datetime(2026, 8, 20, 21, 0)) == [record]
+
+
 def test_day_reservations_keeps_all_statuses_for_reporting():
     reservations = [
         {"date": "2026-08-20", "stat": "RESERVE"},
@@ -358,6 +378,87 @@ def test_history_stat_only_reserve_is_active():
     assert active_reservations_for_day([{**base, "stat": "CHECK_IN"}], "2026-08-20") == []
     assert active_reservations_for_day([{**base, "stat": "IN_USE"}], "2026-08-20") == []
     assert active_reservations_for_day([{**base, "stat": "COMPLETE"}], "2026-08-20") == []
+
+
+def test_reservation_state_maps_in_use_and_terminal_history_statuses():
+    assert reservation_state({"stat": "CHECK_IN"}) == "in_use"
+    assert reservation_state({"stat": "IN_USE"}) == "in_use"
+    assert reservation_state({"stat": "COMPLETE"}) == "completed"
+    assert reservation_state({"stat": "AWAY"}) == "missed"
+    assert reservation_state({"stat": "CANCEL"}) == "cancelled"
+
+
+def test_find_reservation_state_matches_current_period_record():
+    records = [{
+        "date": "2026-08-20",
+        "begin": "08:00",
+        "end": "12:00",
+        "loc": "4层计算机类借阅区，座位号169",
+        "stat": "CHECK_IN",
+    }]
+
+    assert find_reservation_state(
+        records,
+        "2026-08-20",
+        {"start": "08:00", "end": "12:00", "room": "4层计算机类借阅区", "seat": "169"},
+    ) == "in_use"
+
+
+def test_find_reservation_record_returns_the_matching_check_in_row():
+    record = {
+        "date": "2026-8-28",
+        "begin": "08:00",
+        "end": "15:00",
+        "loc": "阅览室，座位号169",
+        "stat": "CHECK_IN",
+        "awayBegin": "11:30",
+        "awayEnd": None,
+    }
+
+    assert find_reservation_record(
+        [record],
+        "2026-08-28",
+        {"start": "08:00", "end": "15:00", "room": "阅览室", "seat": "169"},
+    ) == record
+
+
+def test_real_history_payload_normalizes_unpadded_dates_and_statuses():
+    payload = {
+        "status": "success",
+        "data": {
+            "count": 2,
+            "reservations": [
+                {
+                    "id": 10337250,
+                    "date": "2026-8-28",
+                    "begin": "15:00",
+                    "end": "18:30",
+                    "loc": "南校区第二图书馆4层4层计算机类借阅区136号",
+                    "stat": "CHECK_IN",
+                },
+                {
+                    "id": 10336564,
+                    "date": "2026-8-28",
+                    "begin": "09:00",
+                    "end": "12:00",
+                    "loc": "南校区第二图书馆4层4层计算机类借阅区136号",
+                    "stat": "COMPLETE",
+                },
+            ],
+        },
+        "message": "",
+        "code": "0",
+    }
+
+    records, total = history_page_records(payload)
+
+    assert total == 2
+    assert len(day_reservations(records, "2026-08-28")) == 2
+    assert find_reservation_state(
+        records,
+        "2026-08-28",
+        {"start": "15:00", "end": "18:30", "room": "4层计算机类借阅区", "seat": "136"},
+    ) == "in_use"
 
 
 def test_history_page_records_unwraps_nested_data_records_and_total_count():

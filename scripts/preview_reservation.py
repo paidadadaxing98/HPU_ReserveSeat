@@ -554,22 +554,31 @@ async def cancel_scheduled_reservation(settings, day: str, period: str) -> SeatR
 async def _click_cancel_for_record(page, record: dict) -> bool:
     start = str(record.get("begin") or record.get("beginTime") or record.get("startTime") or "").strip()
     end = str(record.get("end") or record.get("endTime") or record.get("finishTime") or "").strip()
-    rows = page.locator("tr, .el-table__row, [role='row'], .reserve-item, .reservation-item")
-    for index in range(await rows.count()):
-        row = rows.nth(index)
-        text = " ".join((await row.inner_text()).split())
-        if start and start not in text:
-            continue
-        if end and end not in text:
-            continue
-        buttons = row.locator("button, a, .el-button").filter(has_text=re.compile("取消预约|取消|释放"))
-        if await buttons.count():
-            await buttons.last.click()
+    rows_selector = "tr, .el-table__row, [role='row'], .reserve-item, .reservation-item"
+    action_selector = (
+        "button:visible, a:visible, .el-button:visible, "
+        ".order-state-cancel:visible, [class*='order-state-cancel']:visible, [role='button']:visible"
+    )
+    action_text = re.compile("取消预约|取消|释放")
+    deadline = asyncio.get_running_loop().time() + 5
+    while asyncio.get_running_loop().time() < deadline:
+        rows = page.locator(rows_selector)
+        for index in range(await rows.count()):
+            row = rows.nth(index)
+            text = " ".join((await row.inner_text()).split())
+            if start and start not in text:
+                continue
+            if end and end not in text:
+                continue
+            actions = row.locator(action_selector).filter(has_text=action_text)
+            if await actions.count():
+                await actions.last.click()
+                return True
+        actions = page.locator(action_selector).filter(has_text=action_text)
+        if await actions.count() == 1:
+            await actions.first.click()
             return True
-    buttons = page.locator("button, a, .el-button").filter(has_text=re.compile("取消预约|取消|释放"))
-    if await buttons.count() == 1:
-        await buttons.first.click()
-        return True
+        await page.wait_for_timeout(200)
     return False
 
 

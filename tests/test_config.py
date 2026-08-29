@@ -24,6 +24,30 @@ def test_settings_bind_control_server_to_localhost_by_default():
     assert Settings(control_token="local-token").control_host == "127.0.0.1"
 
 
+def test_settings_use_bounded_monitor_reconnect_defaults():
+    settings = Settings(control_token="local-token")
+
+    assert settings.dynamic_reconnect_base_seconds == 10
+    assert settings.dynamic_reconnect_max_seconds == 300
+    assert settings.dynamic_reconnect_max_attempts == 5
+    assert settings.dynamic_manual_login_timeout_seconds == 300
+
+
+def test_load_settings_reads_monitor_reconnect_configuration(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SEAT_DYNAMIC_RECONNECT_BASE_SECONDS", "12")
+    monkeypatch.setenv("SEAT_DYNAMIC_RECONNECT_MAX_SECONDS", "240")
+    monkeypatch.setenv("SEAT_DYNAMIC_RECONNECT_MAX_ATTEMPTS", "4")
+    monkeypatch.setenv("SEAT_DYNAMIC_MANUAL_LOGIN_TIMEOUT_SECONDS", "90")
+
+    settings = load_settings()
+
+    assert settings.dynamic_reconnect_base_seconds == 12
+    assert settings.dynamic_reconnect_max_seconds == 240
+    assert settings.dynamic_reconnect_max_attempts == 4
+    assert settings.dynamic_manual_login_timeout_seconds == 90
+
+
 def test_load_settings_reads_wecom_webhook(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SEAT_WECOM_WEBHOOK", "https://example.test/webhook")
@@ -105,6 +129,28 @@ def test_load_accounts_reads_json_and_derives_isolated_paths(monkeypatch, tmp_pa
         profile_path=(tmp_path / "accounts" / "alice" / "browser-profile").resolve(),
         db_path=(tmp_path / "accounts" / "alice" / "seat_assistant.db").resolve(),
     )]
+
+
+def test_load_account_settings_derives_a_separate_monitor_profile(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "accounts.json").write_text(json.dumps({
+        "accounts": [{"id": "alice", "account": "1001", "password": "secret"}]
+    }), encoding="utf-8")
+
+    settings = load_account_settings("alice")
+
+    assert settings.profile_path == str((tmp_path / "accounts" / "alice" / "browser-profile").resolve())
+    assert settings.monitor_profile_path == str((tmp_path / "accounts" / "alice" / "monitor-profile").resolve())
+
+
+def test_legacy_settings_derives_monitor_profile_next_to_legacy_profile(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SEAT_ACCOUNT", "student-a")
+    monkeypatch.setenv("SEAT_PASSWORD", "secret")
+
+    settings = load_account_settings()
+
+    assert settings.monitor_profile_path == str((tmp_path / "monitor-profile").resolve())
 
 
 def test_load_accounts_resolves_initialization_preferences_and_inheritance(monkeypatch, tmp_path):
@@ -284,9 +330,9 @@ def test_load_accounts_rejects_empty_json_account_list(monkeypatch, tmp_path):
         load_accounts()
 
 
-def test_settings_reject_success_limit_above_five():
-    with pytest.raises(ValueError, match="1 到 5"):
-        Settings(control_token="local-token", daily_success_limit=6)
+def test_settings_reject_success_limit_above_fifteen():
+    with pytest.raises(ValueError, match="1 到 15"):
+        Settings(control_token="local-token", daily_success_limit=16)
 
 
 def test_settings_allow_five_daily_successes_and_keep_two_optional_periods_disabled():
@@ -296,6 +342,54 @@ def test_settings_allow_five_daily_successes_and_keep_two_optional_periods_disab
     assert settings.periods["evening"].enabled is True
     assert settings.periods["period04"].enabled is False
     assert settings.periods["period05"].enabled is False
+
+
+def test_settings_default_dynamic_compensation_values():
+    settings = Settings(control_token="local-token")
+
+    assert settings.daily_success_limit == 15
+    assert settings.max_cancel_per_day == 15
+    assert settings.dynamic_before_minutes == 30
+    assert settings.dynamic_after_minutes == 90
+    assert settings.dynamic_boundary_lead_minutes == 2
+    assert settings.dynamic_normal_poll_seconds == 180
+    assert settings.dynamic_boundary_poll_seconds == 120
+    assert settings.dynamic_late_reschedule_minutes == 30
+    assert settings.dynamic_max_periods == 3
+
+
+def test_load_settings_reads_access_records_endpoint(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SEAT_ACCESS_RECORDS_URL", "https://access.test/records?code={activation_code}")
+
+    settings = load_settings()
+
+    assert settings.access_records_url == "https://access.test/records?code={activation_code}"
+
+
+def test_load_settings_reads_dynamic_compensation_values(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SEAT_DAILY_SUCCESS_LIMIT", "12")
+    monkeypatch.setenv("SEAT_MAX_CANCEL_PER_DAY", "11")
+    monkeypatch.setenv("SEAT_DYNAMIC_BEFORE_MINUTES", "45")
+    monkeypatch.setenv("SEAT_DYNAMIC_AFTER_MINUTES", "75")
+    monkeypatch.setenv("SEAT_DYNAMIC_BOUNDARY_LEAD_MINUTES", "3")
+    monkeypatch.setenv("SEAT_DYNAMIC_NORMAL_POLL_SECONDS", "240")
+    monkeypatch.setenv("SEAT_DYNAMIC_BOUNDARY_POLL_SECONDS", "90")
+    monkeypatch.setenv("SEAT_DYNAMIC_LATE_RESCHEDULE_MINUTES", "30")
+    monkeypatch.setenv("SEAT_DYNAMIC_MAX_PERIODS", "2")
+
+    settings = load_settings()
+
+    assert settings.daily_success_limit == 12
+    assert settings.max_cancel_per_day == 11
+    assert settings.dynamic_before_minutes == 45
+    assert settings.dynamic_after_minutes == 75
+    assert settings.dynamic_boundary_lead_minutes == 3
+    assert settings.dynamic_normal_poll_seconds == 240
+    assert settings.dynamic_boundary_poll_seconds == 90
+    assert settings.dynamic_late_reschedule_minutes == 30
+    assert settings.dynamic_max_periods == 2
 
 
 def test_load_accounts_can_enable_a_fifth_period(monkeypatch, tmp_path):
