@@ -19,6 +19,7 @@ from seat_assistant.wecom_bot import (
     SingleInstanceLock,
     WeComBotRunner,
     WeComCommandRouter,
+    render_local_status,
 )
 
 
@@ -42,11 +43,28 @@ def build_runner(settings=None, accounts=None, sleep=None):
             return False
         return repository.enqueue_bot_command(date.today().isoformat(), request_id, sender, text)
 
+    def read_status(account_id):
+        repository = repositories.get(account_id)
+        if repository is None:
+            return "当前账号数据库不存在。"
+        day = date.today().isoformat()
+        return render_local_status(day, repository.reservations(day), repository.dynamic_sessions(day))
+
+    def set_default(account_id, period, value):
+        repository = repositories.get(account_id)
+        if repository is None:
+            return False
+        repository.set_default(period, value)
+        repository.event("default_override", period, value)
+        return True
+
     router = WeComCommandRouter(
         resolver,
         send_to_user=transport.send_to_user,
         reply=transport.reply,
         command_submitter=submit_command,
+        status_reader=read_status,
+        default_setter=set_default,
     )
     return WeComBotRunner(
         bot_id=settings.wecom_bot_id,

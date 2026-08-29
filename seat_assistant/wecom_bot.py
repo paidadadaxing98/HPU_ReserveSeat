@@ -14,7 +14,7 @@ import uuid
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from .commands import REMOTE_COMMAND_HELP, REMOTE_COMMAND_KINDS, parse_command
+from .commands import BOT_COMMAND_HELP, REMOTE_COMMAND_HELP, REMOTE_COMMAND_KINDS, parse_command
 from .notifications import render_tweet_card, render_tweet_push
 
 
@@ -35,6 +35,54 @@ class Recipient:
     account_id: str
     user_id: str
     display_name: str
+
+
+_PERIOD_LABELS = {
+    "morning": "上午",
+    "afternoon": "下午",
+    "evening": "晚上",
+    "period04": "第4段",
+    "period05": "第5段",
+    "manual": "手动",
+}
+
+_STATUS_LABELS = {
+    "reserved": "已预约",
+    "uncertain": "结果待核验",
+    "failed": "预约失败",
+    "cancelled": "已取消",
+    "monitoring": "监控中",
+    "entered": "履约中",
+    "away_cancelled": "暂离超时已取消",
+}
+
+
+def render_local_status(day: str, reservations, dynamic_sessions=()) -> str:
+    """Render the latest account state available in local SQLite."""
+    rows = list(reservations or [])
+    if not rows:
+        return f"当前状态（{day}）：暂无本地预约记录。"
+    sessions = {
+        str(item.get("period")): item
+        for item in (dynamic_sessions or [])
+        if isinstance(item, dict)
+    }
+    lines = [f"当前状态（{day}）："]
+    for row in rows:
+        period, status, start, end, room, seat = row[:6]
+        session = sessions.get(str(period))
+        if session and session.get("status") == "entered":
+            status = "entered"
+        label = _STATUS_LABELS.get(str(status), str(status))
+        details = [f"{_PERIOD_LABELS.get(str(period), period)}：{label}"]
+        if start and end:
+            details.append(f"{start}-{end}")
+        if room:
+            details.append(str(room))
+        if seat:
+            details.append(f"座位{seat}")
+        lines.append("，".join(details) + "。")
+    return "\n".join(lines)
 
 
 class MessageDeduplicator:
@@ -280,12 +328,22 @@ class AccountRecipientResolver:
 
 class WeComCommandRouter:
 
-    def __init__(self, resolver: AccountRecipientResolver, send_to_user, reply, command_submitter=None):
+    def __init__(
+        self,
+        resolver: AccountRecipientResolver,
+        send_to_user,
+        reply,
+        command_submitter=None,
+        status_reader=None,
+        default_setter=None,
+    ):
 
         self.resolver = resolver
         self.send_to_user = send_to_user
         self.reply = reply
         self.command_submitter = command_submitter
+        self.status_reader = status_reader
+        self.default_setter = default_setter
 
 
     def handle(self, message: WeComBotMessage, transport=None) -> bool:
@@ -293,11 +351,52 @@ class WeComCommandRouter:
         send_to_user = getattr(transport, "send_to_user", self.send_to_user)
         reply = getattr(transport, "reply", self.reply)
         command = parse_command(message.text)
+        if command.kind == "help":
+            reply(message, BOT_COMMAND_HELP)
+            return True
+        if command.kind == "set_default":
+            recipient = self.resolver.resolve_sender(message.sender)
+            if recipient is None:
+                reply(message, "没有权限修改默认到馆时间。")
+                return False
+            if self.default_setter is None:
+                reply(message, "默认到馆时间修改功能尚未配置。")
+                return False
+            try:
+                updated = self.default_setter(
+                    recipient.account_id,
+                    command.period,
+                    command.at,
+                )
+            except Exception as exc:
+                logging.getLogger(__name__).warning("默认到馆时间写入失败", exc_info=True)
+                reply(message, f"默认到馆时间修改失败：{type(exc).__name__}。")
+                return False
+            if not updated:
+                reply(message, "默认到馆时间写入失败，请检查账号数据库。")
+                return False
+            period_label = {"morning": "上午", "afternoon": "下午", "evening": "晚上"}.get(
+                command.period,
+                command.period,
+            )
+            reply(message, f"已将{period_label}默认到馆时间改为 {command.at}，已写入本地数据库。")
+            return True
         if command.kind in REMOTE_COMMAND_KINDS:
             recipient = self.resolver.resolve_sender(message.sender)
             if recipient is None:
                 reply(message, "没有权限执行座位控制命令。")
                 return False
+            if command.kind == "status":
+                if self.status_reader is None:
+                    reply(message, "当前状态查询未配置。")
+                    return False
+                try:
+                    status = self.status_reader(recipient.account_id)
+                except Exception as exc:
+                    reply(message, f"状态查询失败：{type(exc).__name__}。")
+                    return False
+                reply(message, str(status))
+                return True
             if self.command_submitter is None:
                 reply(message, "座位控制命令尚未配置执行队列。")
                 return False
@@ -309,8 +408,8 @@ class WeComCommandRouter:
                 message.text.strip(),
             )
             reply(message, (
-                f"已收到命令：{message.text.strip()}。动态监控将在下一轮执行。"
-                if queued else "该命令已收到，未重复执行。"
+                f"已收到命令：{message.text.strip()}。已写入本地数据库，等待动态监控受理。"
+                if queued else "该命令已收到，数据库中已有记录，未重复执行。"
             ))
             return True
         if command.kind != "push_tweet":
@@ -495,10 +594,27 @@ class OfficialSdkTransport:
         if message.raw_frame is None:
             return self.send_to_user(message.sender, text)
         try:
-            result = self._run_sync(self._client.reply(
-                message.raw_frame,
-                {"msgtype": "text", "text": {"content": text}},
-            ))
+            stream_id = f"stream_{uuid.uuid4().hex}"
+            reply_stream = getattr(self._client, "reply_stream", None)
+            if callable(reply_stream):
+                result = self._run_sync(reply_stream(
+                    message.raw_frame,
+                    stream_id,
+                    text,
+                    True,
+                ))
+            else:
+                result = self._run_sync(self._client.reply(
+                    message.raw_frame,
+                    {
+                        "msgtype": "stream",
+                        "stream": {
+                            "id": stream_id,
+                            "finish": True,
+                            "content": text,
+                        },
+                    },
+                ))
             return not isinstance(result, dict) or result.get("errcode", 0) == 0
         except Exception:
             logging.getLogger(__name__).warning("企业微信官方 SDK 回复失败", exc_info=True)

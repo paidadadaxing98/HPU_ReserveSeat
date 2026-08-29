@@ -1,6 +1,6 @@
 # Seat Assistant
 
-当前版本：`v1.1.0`
+当前版本：`v1.1.2`
 
 Seat Assistant 是一个运行在 Windows 本机的座位预约助手。它通过 Playwright 操作河南理工大学图书馆座位系统，支持预约、结果核验、企业微信通知、动态签到窗口补偿和暂离超时保护。
 
@@ -94,9 +94,9 @@ notepad accounts.json
 .\scripts\install-task.ps1 -Python ".\.venv\Scripts\python.exe"
 ```
 
-修改代码或动态窗口配置后，需要重新执行上面的命令以更新 Windows 定时任务。
+#### **修改代码、预约时段配置或动态窗口配置后，需要重新执行上面的命令以更新 Windows 定时任务。**
 
-动态监控也可以手动运行。指定时段和完整动态窗口时，机器人会由同一个进程托管，并在窗口结束时一并退出：
+动态监控也可以手动运行；企业微信机器人由全天机器人任务单独运行：
 
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.run_dynamic_monitor --date (Get-Date -Format yyyy-MM-dd)
@@ -105,11 +105,6 @@ notepad accounts.json
   --period morning `
   --run-for-minutes 165
 ```
-
-安装定时任务后，静态预约任务继续负责每天预约；动态任务会按安装时读取到的配置，为每个启用时段覆盖完整动态窗口。动态任务名称为 `SeatAssistant-Dynamic-Morning`、`SeatAssistant-Dynamic-Afternoon`、`SeatAssistant-Dynamic-Evening`、`SeatAssistant-Dynamic-Period04` 和 `SeatAssistant-Dynamic-Period05`。重新调整动态窗口、默认到馆时间或启用时段后，需要重新运行安装脚本；超过 3 个启用时段时，动态任务会被跳过。
-
-监控程序会在动态窗口内按配置查询，并在需要取消或重约时打开独立的后台浏览器会话。查询失败时保留当前预约并进入安全保持状态。有限时长运行会托管一个企业微信机器人，机器人和监控共享同一个生命周期；没有机器人凭据时只运行监控。
-
 
 ## 常用命令
 
@@ -129,7 +124,7 @@ Get-Content ".\logs\scheduled-$(Get-Date -Format yyyy-MM-dd).log" -Wait
 # 单独启动企业微信双向机器人（调试或长期运行）
 .\.venv\Scripts\python.exe scripts\run_wecom_bot.py
 
-# 手动启动一个时段的动态监控和托管机器人
+# 手动启动一个时段的动态监控
 .\.venv\Scripts\python.exe -m scripts.run_dynamic_monitor --period morning --run-for-minutes 165
 
 # 启动本机控制页
@@ -148,11 +143,11 @@ Get-Content ".\logs\scheduled-$(Get-Date -Format yyyy-MM-dd).log" -Wait
 
 项目按三层协作：
 
-| 层 | 作用 | 事实来源 |
-|---|---|---|
-| 配置层 | 保存账号、学习时段、位置偏好、企业微信和动态参数 | `.env`、`accounts.json` |
-| 远端操作层 | 登录、选座、预约、取消、读取“我的预约”和门禁记录 | 学校网页及其 API |
-| 本地状态层 | 保存预约结果、会话进度、命令队列、去重记录和限额 | SQLite 数据库 |
+| 层     | 作用                        | 事实来源                   |
+| ----- | ------------------------- | ---------------------- |
+| 配置层   | 保存账号、学习时段、位置偏好、企业微信和动态参数  | `.env`、`accounts.json` |
+| 远端操作层 | 登录、选座、预约、取消、读取“我的预约”和门禁记录 | 学校网页及其 API             |
+| 本地状态层 | 保存预约结果、会话进度、命令队列、去重记录和限额  | SQLite 数据库             |
 
 核心原则是：学校网页/API决定现实状态，本地数据库负责记忆和安全控制。数据库不能单独证明远端预约成功或已经入馆。
 
@@ -187,19 +182,28 @@ Get-Content ".\logs\scheduled-$(Get-Date -Format yyyy-MM-dd).log" -Wait
 
 ### 企业微信双向交互
 
-机器人通过官方长连接接收消息，通过账号绑定的 `wecom_user_id` 做权限校验。控制命令先写入 SQLite 的 `bot_commands` 队列，再由动态监控执行并回传结果。
+机器人通过官方长连接接收消息，通过账号绑定的 `wecom_user_id` 做预约控制和状态查询权限校验。取消、推迟等涉及网页操作的命令先写入 SQLite 的 `bot_commands` 队列，再由动态监控执行并回传结果；修改默认到馆时间只写入对应账号的 SQLite `defaults` 表，立即生效但不改动当天已有预约；“状态”直接读取本地数据库，“帮助”直接返回命令清单。
+
+机器人收到取消、推迟等修改类命令后会立即回复“已写入本地数据库，等待动态监控受理”；实际取消或调整操作在当天对应动态监控的下一轮执行。
 
 当前远程控制命令：
 
 ```text
+帮助
+状态
 今天不去了
 取消上午
 取消下午
 取消晚上
-状态
+上午推迟到 09:20
+下午推迟到 15:20
+晚上推迟到 20:20
+以后上午默认到馆时间为 09:05
+以后下午默认到馆时间为 14:05
+以后晚上默认到馆时间为 19:05
 ```
 
-机器人负责接收、去重和回复；动态监控负责真正取消预约或读取状态。未绑定发送人不能执行控制命令，机器人断线会自动重连。
+机器人负责接收、去重和回复；动态监控负责真正取消或调整预约。未绑定发送人不能执行预约控制和状态查询，机器人断线会自动重连。
 
 ## 手动预约边界
 
@@ -217,15 +221,15 @@ Get-Content ".\logs\scheduled-$(Get-Date -Format yyyy-MM-dd).log" -Wait
 
 重要配置：
 
-| 配置 | 默认值 | 作用 |
-|---|---:|---|
-| `SEAT_DRY_RUN` | `true` | 本地服务默认不提交真实预约 |
-| `SEAT_DAILY_SUCCESS_LIMIT` | `15` | 每日成功预约上限 |
-| `SEAT_MAX_CANCEL_PER_DAY` | `15` | 每日动态取消上限 |
-| `SEAT_DYNAMIC_BEFORE_MINUTES` | `30` | 动态窗口提前范围 |
-| `SEAT_DYNAMIC_AFTER_MINUTES` | `90` | 动态窗口延后范围 |
-| `SEAT_DYNAMIC_LATE_RESCHEDULE_MINUTES` | `30` | 迟到重约颗粒度 |
-| `SEAT_DYNAMIC_MAX_PERIODS` | `3` | 动态补偿最多启用时段数 |
+| 配置                                     | 默认值    | 作用            |
+| -------------------------------------- | ------:| ------------- |
+| `SEAT_DRY_RUN`                         | `true` | 本地服务默认不提交真实预约 |
+| `SEAT_DAILY_SUCCESS_LIMIT`             | `15`   | 每日成功预约上限      |
+| `SEAT_MAX_CANCEL_PER_DAY`              | `15`   | 每日动态取消上限      |
+| `SEAT_DYNAMIC_BEFORE_MINUTES`          | `30`   | 动态窗口提前范围      |
+| `SEAT_DYNAMIC_AFTER_MINUTES`           | `90`   | 动态窗口延后范围      |
+| `SEAT_DYNAMIC_LATE_RESCHEDULE_MINUTES` | `30`   | 迟到重约颗粒度       |
+| `SEAT_DYNAMIC_MAX_PERIODS`             | `3`    | 动态补偿最多启用时段数   |
 
 真实预约前确认：
 

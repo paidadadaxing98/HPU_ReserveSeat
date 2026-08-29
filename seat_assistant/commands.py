@@ -4,8 +4,19 @@ import re
 
 
 PERIODS = {"上午": "morning", "下午": "afternoon", "晚上": "evening"}
-REMOTE_COMMAND_KINDS = frozenset({"cancel_day", "cancel", "status"})
-REMOTE_COMMAND_HELP = "支持命令：今天不去了、取消上午、取消下午、取消晚上、状态"
+REMOTE_COMMAND_KINDS = frozenset({"cancel_day", "cancel", "delay", "status"})
+REMOTE_COMMAND_HELP = (
+    "支持命令：今天不去了、取消上午、取消下午、取消晚上、"
+    "上午推迟到 HH:MM、下午推迟到 HH:MM、晚上推迟到 HH:MM、"
+    "以后上午/下午/晚上默认到馆时间为 HH:MM、状态"
+)
+BOT_COMMAND_HELP = (
+    "可用命令：帮助、状态、今天不去了、取消上午、取消下午、取消晚上；"
+    "上午推迟到 HH:MM、下午推迟到 HH:MM、晚上推迟到 HH:MM；"
+    "以后上午默认到馆时间为 HH:MM、以后下午默认到馆时间为 HH:MM、"
+    "以后晚上默认到馆时间为 HH:MM；"
+    "推文 <账号或别名> 标题 | 链接 [| 备注]"
+)
 
 
 @dataclass(frozen=True)
@@ -21,6 +32,8 @@ class Command:
 
 def parse_command(text: str) -> Command:
     text = text.strip().replace("：", ":")
+    if text in {"帮助", "命令", "菜单"}:
+        return Command("help")
     if text.startswith("推文"):
         return _parse_push_tweet(text)
     if text in {"今天不去了", "取消全天", "取消今天"}:

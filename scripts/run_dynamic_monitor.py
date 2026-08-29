@@ -4,9 +4,6 @@ import argparse
 import asyncio
 import json
 from datetime import date, datetime, timedelta
-from pathlib import Path
-import subprocess
-import sys
 
 from seat_assistant.access_records import AuthenticationError, BrowserAccessRecordProvider
 from seat_assistant.dynamic_monitor import DynamicMonitor
@@ -146,41 +143,6 @@ async def _handle_authentication_failure(
         delay = min(delay, remaining)
     await sleep(delay)
     return None, failed_attempt, last_result, False
-
-
-def start_managed_bot(settings, minutes: int):
-    """Start one bounded WeCom bot owned by the dynamic monitor process."""
-    if not getattr(settings, "wecom_bot_id", "") or not getattr(settings, "wecom_bot_secret", ""):
-        return None
-    project_root = Path(__file__).resolve().parents[1]
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    try:
-        return subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "scripts.run_wecom_bot",
-                "--run-for-minutes",
-                str(minutes),
-            ],
-            cwd=str(project_root),
-            creationflags=creationflags,
-        )
-    except Exception as exc:
-        print(f"企业微信机器人启动失败：{exc}", flush=True)
-        return None
-
-
-def stop_managed_bot(process) -> None:
-    """Stop a monitor-owned bot without leaving a child process behind."""
-    if process is None or process.poll() is not None:
-        return
-    process.terminate()
-    try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=10)
 
 
 async def run_account(
@@ -373,46 +335,20 @@ async def run_monitor(
         notify_scheduler_summary=False,
     )
     results = {}
-    managed_bot = None
     deadline = (
         datetime.now() + timedelta(minutes=run_for_minutes)
         if run_for_minutes is not None
         else None
     )
-    if run_for_minutes is not None and services and _has_monitor_work(services, day, period):
-        managed_bot = start_managed_bot(services[0].settings, run_for_minutes)
-    try:
-        for service in services:
-            account_id = getattr(service, "account_id", "default")
-            kwargs = {"once": once}
-            if period is not None:
-                kwargs["target_period"] = period
-            if deadline is not None:
-                kwargs["deadline"] = deadline
-            results[account_id] = await run_account(service, day, **kwargs)
-        return results
-    finally:
-        stop_managed_bot(managed_bot)
-
-
-def _has_monitor_work(services, day: str, period: str | None) -> bool:
-    """Preflight local state so empty dynamic tasks do not start a bot."""
     for service in services:
-        repository = getattr(service, "repo", None)
-        if repository is None:
-            # Keep the entrypoint testable with lightweight service doubles.
-            return True
-        if repository.pending_bot_commands(day, limit=1):
-            return True
-        try:
-            monitor = DynamicMonitor(service)
-            kwargs = {"target_period": period} if period is not None else {}
-            prepared = monitor.prepare(day, **kwargs)
-        except Exception:
-            return True
-        if prepared and prepared.get("status") != "disabled":
-            return True
-    return False
+        account_id = getattr(service, "account_id", "default")
+        kwargs = {"once": once}
+        if period is not None:
+            kwargs["target_period"] = period
+        if deadline is not None:
+            kwargs["deadline"] = deadline
+        results[account_id] = await run_account(service, day, **kwargs)
+    return results
 
 
 def parse_args(argv=None):

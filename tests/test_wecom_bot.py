@@ -2,6 +2,8 @@ from pathlib import Path
 import threading
 import time
 
+import pytest
+
 from seat_assistant.commands import Command
 from seat_assistant.config import AccountSettings
 from seat_assistant.wecom_bot import (
@@ -94,7 +96,113 @@ def test_router_authorized_control_command_is_queued_for_account(tmp_path):
 
     assert router.handle(message) is True
     assert queued == [("account01", "req-1", "user-a", "今天不去了")]
-    assert replies == ["已收到命令：今天不去了。动态监控将在下一轮执行。"]
+    assert replies == ["已收到命令：今天不去了。已写入本地数据库，等待动态监控受理。"]
+
+
+@pytest.mark.parametrize("text", [
+    "取消上午",
+    "取消下午",
+    "取消晚上",
+    "上午推迟到 09:20",
+    "下午推迟到 15:20",
+])
+def test_router_queues_period_control_commands_for_dynamic_monitor(tmp_path, text):
+    accounts = [
+        AccountSettings(
+            id="account01",
+            account="1001",
+            password="secret",
+            profile_path=tmp_path / "profile",
+            db_path=tmp_path / "db.sqlite",
+            wecom_user_id="user-a",
+        )
+    ]
+    queued = []
+    router = WeComCommandRouter(
+        AccountRecipientResolver(accounts),
+        send_to_user=lambda user_id, text: True,
+        reply=lambda message, text: True,
+        command_submitter=lambda account_id, request_id, sender, command_text: queued.append(
+            (account_id, request_id, sender, command_text)
+        ) or True,
+    )
+
+    assert router.handle(WeComBotMessage("msg-control", "req-control", "user-a", text)) is True
+    assert queued == [("account01", "req-control", "user-a", text)]
+
+
+def test_router_reports_duplicate_control_command_is_already_in_database(tmp_path):
+    accounts = [
+        AccountSettings(
+            id="account01",
+            account="1001",
+            password="secret",
+            profile_path=tmp_path / "profile",
+            db_path=tmp_path / "db.sqlite",
+            wecom_user_id="user-a",
+        )
+    ]
+    replies = []
+    router = WeComCommandRouter(
+        AccountRecipientResolver(accounts),
+        send_to_user=lambda user_id, text: True,
+        reply=lambda message, text: replies.append(text) or True,
+        command_submitter=lambda *args: False,
+    )
+
+    assert router.handle(WeComBotMessage("msg-duplicate", "req-duplicate", "user-a", "今天不去了")) is True
+    assert replies == ["该命令已收到，数据库中已有记录，未重复执行。"]
+
+
+def test_router_returns_status_directly_without_queueing_command(tmp_path):
+    accounts = [
+        AccountSettings(
+            id="account01",
+            account="1001",
+            password="secret",
+            profile_path=tmp_path / "profile",
+            db_path=tmp_path / "db.sqlite",
+            wecom_user_id="user-a",
+        )
+    ]
+    replies = []
+    router = WeComCommandRouter(
+        AccountRecipientResolver(accounts),
+        send_to_user=lambda user_id, text: True,
+        reply=lambda message, text: replies.append(text) or True,
+        command_submitter=lambda *args: (_ for _ in ()).throw(AssertionError("状态不应进入命令队列")),
+        status_reader=lambda account_id: "状态（2026-08-29）：上午已预约 08:00-12:00。",
+    )
+
+    assert router.handle(WeComBotMessage("msg-status", "req-status", "user-a", "状态")) is True
+    assert replies == ["状态（2026-08-29）：上午已预约 08:00-12:00。"]
+
+
+def test_router_returns_help_directly_without_queueing_command(tmp_path):
+    accounts = [
+        AccountSettings(
+            id="account01",
+            account="1001",
+            password="secret",
+            profile_path=tmp_path / "profile",
+            db_path=tmp_path / "db.sqlite",
+            wecom_user_id="user-a",
+        )
+    ]
+    replies = []
+    router = WeComCommandRouter(
+        AccountRecipientResolver(accounts),
+        send_to_user=lambda user_id, text: True,
+        reply=lambda message, text: replies.append(text) or True,
+        command_submitter=lambda *args: (_ for _ in ()).throw(AssertionError("帮助不应进入命令队列")),
+    )
+
+    assert router.handle(WeComBotMessage("msg-help", "req-help", "unknown-user", "帮助")) is True
+    assert "帮助" in replies[0]
+    assert "状态" in replies[0]
+    assert "今天不去了" in replies[0]
+    assert "下午默认到馆时间" in replies[0]
+    assert "晚上默认到馆时间" in replies[0]
 
 
 def test_router_rejects_control_command_from_unconfigured_sender(tmp_path):

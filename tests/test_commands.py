@@ -25,6 +25,20 @@ def test_parse_default_change_and_cancel():
     assert parse_command("今天不去了").kind == "cancel_day"
 
 
+@pytest.mark.parametrize(
+    ("text", "period", "at"),
+    [
+        ("以后上午默认到馆时间为 09:05", "morning", "09:05"),
+        ("以后下午默认到馆时间为 14:05", "afternoon", "14:05"),
+        ("以后晚上默认到馆时间为 19:05", "evening", "19:05"),
+    ],
+)
+def test_parse_default_change_for_each_period(text, period, at):
+    command = parse_command(text)
+
+    assert (command.kind, command.period, command.at) == ("set_default", period, at)
+
+
 def test_parse_invalid_clock_as_help_instead_of_creating_an_action():
     assert parse_command("上午推迟到 25:00").kind == "help"
 

@@ -3,9 +3,6 @@ param(
   [switch]$DryRun,
   [string]$Python = "$PSScriptRoot\..\.venv\Scripts\python.exe",
   [string]$Project = (Resolve-Path "$PSScriptRoot\..").Path,
-  [string]$MorningAt = "22:05",
-  [string]$AfternoonAt = "12:30",
-  [string]$EveningAt = "19:10",
   [string]$Period04At = "10:05",
   [string]$Period05At = "13:05",
   [int]$RepeatMinutes = 10
@@ -23,6 +20,7 @@ $taskNames = @(
   "SeatAssistant-Dynamic-Evening",
   "SeatAssistant-Dynamic-Period04",
   "SeatAssistant-Dynamic-Period05",
+  "SeatAssistant-Bot-Daily",
   "SeatAssistant-Bot-Morning",
   "SeatAssistant-Bot-Morning-Fallback",
   "SeatAssistant-Bot-Afternoon",
@@ -71,23 +69,51 @@ $principal = New-ScheduledTaskPrincipal `
   -RunLevel Limited
 
 $definitions = @(
-  @{ Name = "SeatAssistant-Morning"; Period = "morning"; At = $MorningAt; Duration = 30; FallbackAt = "07:00" },
-  @{ Name = "SeatAssistant-Afternoon"; Period = "afternoon"; At = $AfternoonAt; Duration = 30 },
-  @{ Name = "SeatAssistant-Evening"; Period = "evening"; At = $EveningAt; Duration = 20 },
-  @{ Name = "SeatAssistant-Period04"; Period = "period04"; At = $Period04At; Duration = 20 },
-  @{ Name = "SeatAssistant-Period05"; Period = "period05"; At = $Period05At; Duration = 20 }
+  @{ Name = "SeatAssistant-Morning"; Period = "morning" },
+  @{ Name = "SeatAssistant-Afternoon"; Period = "afternoon" },
+  @{ Name = "SeatAssistant-Evening"; Period = "evening" },
+  @{ Name = "SeatAssistant-Period04"; Period = "period04"; FallbackAt = $Period04At; FallbackDuration = 20 },
+  @{ Name = "SeatAssistant-Period05"; Period = "period05"; FallbackAt = $Period05At; FallbackDuration = 20 }
 )
 
 foreach ($item in $definitions) {
-  $at = [datetime]::ParseExact($item.At, "HH:mm", [Globalization.CultureInfo]::InvariantCulture)
-  $triggers = @()
-  for ($offset = 0; $offset -le $item.Duration; $offset += $RepeatMinutes) {
-    $triggerAt = $at.AddMinutes($offset)
-    $triggers += New-ScheduledTaskTrigger -Daily -At $triggerAt
-  }
+  $scheduleArgs = @(
+    "-m", "scripts.reservation_task_schedule",
+    "--period", $item.Period,
+    "--repeat-minutes", $RepeatMinutes
+  )
   if ($item.FallbackAt) {
-    $fallbackAt = [datetime]::ParseExact($item.FallbackAt, "HH:mm", [Globalization.CultureInfo]::InvariantCulture)
-    $triggers += New-ScheduledTaskTrigger -Daily -At $fallbackAt
+    $scheduleArgs += @(
+      "--fallback-start", $item.FallbackAt,
+      "--fallback-duration-minutes", $item.FallbackDuration
+    )
+  }
+  $scheduleOutput = & $pythonPath @scheduleArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw "无法计算预约任务时间：$($item.Period)"
+  }
+  try {
+    $schedule = ($scheduleOutput -join "`n") | ConvertFrom-Json
+  }
+  catch {
+    throw "预约任务时间输出不是有效 JSON：$($item.Period)"
+  }
+  if (-not $schedule.enabled) {
+    Write-Host "已跳过：$($item.Name)（$($schedule.message)）"
+    continue
+  }
+  $triggerTimes = @($schedule.triggers)
+  if ($triggerTimes.Count -eq 0) {
+    throw "预约任务没有可用触发时间：$($item.Period)"
+  }
+  $triggers = @()
+  foreach ($triggerText in $triggerTimes) {
+    $triggerAt = [datetime]::ParseExact(
+      [string]$triggerText,
+      "HH:mm",
+      [Globalization.CultureInfo]::InvariantCulture
+    )
+    $triggers += New-ScheduledTaskTrigger -Daily -At $triggerAt
   }
   $action = New-ScheduledTaskAction `
     -Execute $pythonPath `
@@ -101,7 +127,7 @@ foreach ($item in $definitions) {
     -Principal $principal `
     -Description "Seat Assistant 无感预约：$($item.Period)" `
     -Force | Out-Null
-  Write-Host "已安装：$($item.Name)，每天 $($item.At) 起每 $RepeatMinutes 分钟检查一次。"
+  Write-Host "已安装：$($item.Name)，每天触发 $($triggerTimes -join ', ')。"
 }
 
 $dynamicPeriods = @(
@@ -165,4 +191,39 @@ foreach ($item in $dynamicPeriods) {
   Write-Host "已安装：$($item.Name)，每天 $($schedule.start) 启动，运行 $duration 分钟至 $($schedule.end)。"
 }
 
-Write-Host "SeatAssistant 无感定时任务安装完成。电脑可锁屏或睡眠，任务会尝试唤醒电脑；动态任务结束时会关闭其托管的企业微信机器人。"
+$botDailyAt = "07:00"
+$botDailyDuration = 921
+$botDailyEnd = ([datetime]::ParseExact(
+  $botDailyAt,
+  "HH:mm",
+  [Globalization.CultureInfo]::InvariantCulture
+) + (New-TimeSpan -Minutes $botDailyDuration)).ToString("HH:mm")
+$botSettings = New-ScheduledTaskSettingsSet `
+  -Hidden `
+  -WakeToRun `
+  -StartWhenAvailable `
+  -RunOnlyIfNetworkAvailable `
+  -AllowStartIfOnBatteries `
+  -DontStopIfGoingOnBatteries `
+  -MultipleInstances IgnoreNew `
+  -RestartCount 5 `
+  -RestartInterval (New-TimeSpan -Minutes 1) `
+  -ExecutionTimeLimit (New-TimeSpan -Minutes ($botDailyDuration + 15))
+$botDailyAction = New-ScheduledTaskAction `
+  -Execute $pythonPath `
+  -Argument "-m scripts.run_wecom_bot --run-for-minutes $botDailyDuration" `
+  -WorkingDirectory $projectPath
+$botDailyTrigger = New-ScheduledTaskTrigger `
+  -Daily `
+  -At ([datetime]::ParseExact($botDailyAt, "HH:mm", [Globalization.CultureInfo]::InvariantCulture))
+Register-ScheduledTask `
+  -TaskName "SeatAssistant-Bot-Daily" `
+  -Action $botDailyAction `
+  -Trigger $botDailyTrigger `
+  -Settings $botSettings `
+  -Principal $principal `
+  -Description "Seat Assistant 企业微信机器人：$botDailyAt-$botDailyEnd" `
+  -Force | Out-Null
+Write-Host "已安装：SeatAssistant-Bot-Daily，每天 $botDailyAt 启动，运行 $botDailyDuration 分钟至 $botDailyEnd。"
+
+Write-Host "SeatAssistant 无感定时任务安装完成。电脑可锁屏或睡眠，任务会尝试唤醒电脑；全天机器人任务在 $botDailyAt-$botDailyEnd 在线。"

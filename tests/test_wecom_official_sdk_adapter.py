@@ -53,6 +53,13 @@ class FakeSdkClient:
         self.replies.append((frame, body))
         return {"errcode": 0}
 
+    async def reply_stream(self, frame, stream_id, content, finish=False, *args, **kwargs):
+        self.replies.append((frame, {
+            "msgtype": "stream",
+            "stream": {"id": stream_id, "finish": finish, "content": content},
+        }))
+        return {"errcode": 0}
+
     async def reply_template_card(self, frame, card):
         self.replies.append((frame, {"msgtype": "template_card", "template_card": card}))
         return {"errcode": 0}
@@ -70,7 +77,7 @@ def test_sdk_transport_sends_markdown_to_user_and_replies():
         transport._loop.close()
 
 
-def test_sdk_transport_reply_uses_original_frame():
+def test_sdk_transport_reply_sends_final_stream_with_original_frame():
     client = FakeSdkClient()
     transport = OfficialSdkTransport(client)
     transport._loop = asyncio.new_event_loop()
@@ -79,8 +86,11 @@ def test_sdk_transport_reply_uses_original_frame():
         "msg-1", "req-1", "sender-a", "内容", raw_frame=_text_frame()
     )
     try:
-        assert transport._run_sync(client.reply(message.raw_frame, {"msgtype": "text", "text": {"content": "已收到"}}))["errcode"] == 0
+        assert transport.reply(message, "已收到") is True
         assert client.replies[0][0] == _text_frame()
+        assert client.replies[0][1]["msgtype"] == "stream"
+        assert client.replies[0][1]["stream"]["finish"] is True
+        assert client.replies[0][1]["stream"]["content"] == "已收到"
     finally:
         transport._loop.close()
 
