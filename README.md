@@ -424,6 +424,18 @@ SEAT_WECOM_BOT_LOCK_FILE=logs/wecom-bot.lock
 推文 @张三 标题 | https://example.test/a | 备注
 ```
 
+手机控制命令也会路由到现有预约服务。只允许 `accounts.json` 中配置的 `wecom_user_id` 发起控制命令：
+
+```text
+今天不去了
+取消上午
+取消下午
+取消晚上
+状态
+```
+
+机器人收到控制命令后会立即回复“已收到”，并写入该账号现有的 SQLite 数据库；动态监控在下一轮查询时关闭浏览器读取会话，再执行已有的取消或状态逻辑。执行结果通过机器人投递箱回传，通常延迟约 2-3 分钟。重复消息按企业微信请求 ID 去重，未配置的发送人不会进入执行队列。
+
 启动后，官方 SDK 负责鉴权、心跳和断线重连；项目负责消息去重、命令解析和账号路由。预约程序会同时发送 Webhook 群卡片，并按账号写入 `SEAT_WECOM_BOT_OUTBOX_DIR` 投递箱；运行中的机器人自动读取投递箱，通过 SDK 的 `send_message(chatid=user_id, ...)` 把同一张卡片发给对应账号，成功后删除投递文件。两条命令之间不依赖 Webhook 群消息回流。
 
 验证方式：
@@ -433,7 +445,7 @@ SEAT_WECOM_BOT_LOCK_FILE=logs/wecom-bot.lock
 \.venv\Scripts\python.exe -m scripts.run_wecom_bot
 ```
 
-第一条命令只做本地验证，不会连接企业微信。第二条命令需要已配置真实 Bot ID、Secret，并保持进程运行；在企业微信中发送 `推文 account03 标题 | https://example.test/a`，机器人应向 `account03` 对应的 `wecom_user_id` 发送一条 Markdown 消息。停止服务使用 `Ctrl+C`。不要把 `.env` 或 `accounts.json` 内容发到日志或聊天中。
+第一条命令只做本地验证，不会连接企业微信。第二条命令需要已配置真实 Bot ID、Secret，并保持进程运行；在企业微信中发送 `推文 account03 标题 | https://example.test/a`，机器人应向 `account03` 对应的 `wecom_user_id` 发送一条 Markdown 消息。验证手机控制时，先确保动态监控进程正在运行，再发送 `今天不去了`：机器人应立即回复已收到，约下一轮监控后收到执行结果；同时可检查账号数据库中的 `bot_commands` 表，确认该请求从 `pending` 变为 `completed` 或 `failed`。停止服务使用 `Ctrl+C`。不要把 `.env` 或 `accounts.json` 内容发到日志或聊天中。
 
 ## 常用辅助命令
 

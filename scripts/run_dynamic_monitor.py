@@ -140,10 +140,10 @@ async def run_account(
     monitor = DynamicMonitor(service)
     _emit_event(service, event_writer, "monitor_start", day=day)
     prepared = monitor.prepare(day)
-    if prepared.get("status") == "disabled":
+    if prepared.get("status") == "disabled" and not monitor.has_pending_commands(day):
         _emit_event(service, event_writer, "monitor_disabled", day=day, status="disabled")
         return prepared
-    if not prepared:
+    if not prepared and not monitor.has_pending_commands(day):
         _emit_event(service, event_writer, "monitor_idle", day=day, status="idle")
         return {"status": "idle", "message": "当天没有可监测的有效预约"}
     dry_run = bool(getattr(service.settings, "dry_run", False))

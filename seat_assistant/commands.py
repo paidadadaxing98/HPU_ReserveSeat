@@ -4,6 +4,8 @@ import re
 
 
 PERIODS = {"上午": "morning", "下午": "afternoon", "晚上": "evening"}
+REMOTE_COMMAND_KINDS = frozenset({"cancel_day", "cancel", "status"})
+REMOTE_COMMAND_HELP = "支持命令：今天不去了、取消上午、取消下午、取消晚上、状态"
 
 
 @dataclass(frozen=True)

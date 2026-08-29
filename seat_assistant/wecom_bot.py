@@ -14,7 +14,7 @@ import uuid
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from .commands import parse_command
+from .commands import REMOTE_COMMAND_HELP, REMOTE_COMMAND_KINDS, parse_command
 from .notifications import render_tweet_card, render_tweet_push
 
 
@@ -245,6 +245,7 @@ class AccountRecipientResolver:
 
         self.default_user = default_user.strip()
         self._recipients = {}
+        self._senders = {}
         for account in accounts:
             user_id = str(getattr(account, "wecom_user_id", "") or "").strip()
             if not user_id:
@@ -252,6 +253,7 @@ class AccountRecipientResolver:
             aliases = tuple(str(value).strip() for value in getattr(account, "wecom_aliases", ()) if str(value).strip())
             display_name = aliases[0] if aliases else account.id
             recipient = Recipient(account.id, user_id, display_name)
+            self._senders[user_id] = recipient
             keys = [account.id, user_id, *getattr(account, "wecom_aliases", ())]
             for key in keys:
                 normalized = str(key).strip().lstrip("@")
@@ -271,13 +273,19 @@ class AccountRecipientResolver:
         return None
 
 
+    def resolve_sender(self, sender: str | None) -> Recipient | None:
+
+        return self._senders.get(str(sender or "").strip())
+
+
 class WeComCommandRouter:
 
-    def __init__(self, resolver: AccountRecipientResolver, send_to_user, reply):
+    def __init__(self, resolver: AccountRecipientResolver, send_to_user, reply, command_submitter=None):
 
         self.resolver = resolver
         self.send_to_user = send_to_user
         self.reply = reply
+        self.command_submitter = command_submitter
 
 
     def handle(self, message: WeComBotMessage, transport=None) -> bool:
@@ -285,8 +293,28 @@ class WeComCommandRouter:
         send_to_user = getattr(transport, "send_to_user", self.send_to_user)
         reply = getattr(transport, "reply", self.reply)
         command = parse_command(message.text)
+        if command.kind in REMOTE_COMMAND_KINDS:
+            recipient = self.resolver.resolve_sender(message.sender)
+            if recipient is None:
+                reply(message, "没有权限执行座位控制命令。")
+                return False
+            if self.command_submitter is None:
+                reply(message, "座位控制命令尚未配置执行队列。")
+                return False
+            request_id = message.request_id.strip() or message.message_id
+            queued = self.command_submitter(
+                recipient.account_id,
+                request_id,
+                message.sender,
+                message.text.strip(),
+            )
+            reply(message, (
+                f"已收到命令：{message.text.strip()}。动态监控将在下一轮执行。"
+                if queued else "该命令已收到，未重复执行。"
+            ))
+            return True
         if command.kind != "push_tweet":
-            reply(message, "支持命令：推文 <账号或别名> 标题 | 链接 [| 备注]")
+            reply(message, f"{REMOTE_COMMAND_HELP}；推文 <账号或别名> 标题 | 链接 [| 备注]")
             return False
         recipient = self.resolver.resolve(command.target)
         if recipient is None:

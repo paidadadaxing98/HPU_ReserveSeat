@@ -9,11 +9,20 @@ class Repository:
     def __init__(self, path: str, account_id: str = "default"):
         Path(path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, check_same_thread=False)
+        self.db.execute("PRAGMA busy_timeout = 5000")
         self.account_id = account_id
         self.db.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, kind TEXT, period TEXT, value TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
         self.db.execute("CREATE TABLE IF NOT EXISTS reservations (date TEXT, period TEXT, status TEXT, start TEXT, end TEXT, room TEXT, seat TEXT, message TEXT DEFAULT '', PRIMARY KEY(date, period))")
         self.db.execute("CREATE TABLE IF NOT EXISTS defaults (period TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS commands (request_id TEXT PRIMARY KEY, text TEXT NOT NULL, response TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS bot_commands ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL UNIQUE, account_id TEXT NOT NULL, "
+            "day TEXT NOT NULL, sender TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', "
+            "response TEXT NOT NULL DEFAULT '{}', received_at TEXT DEFAULT CURRENT_TIMESTAMP, "
+            "claimed_at TEXT, handled_at TEXT"
+            ")"
+        )
         self.db.execute("CREATE TABLE IF NOT EXISTS scheduler_runs (date TEXT PRIMARY KEY, status TEXT NOT NULL, summary TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
         self.db.execute("CREATE TABLE IF NOT EXISTS successful_bookings (date TEXT NOT NULL, account_id TEXT NOT NULL, reservation_key TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(date, account_id, reservation_key))")
         self.db.execute(
@@ -117,6 +126,63 @@ class Repository:
         if row is None:
             return None
         return {"request_id": row[0], "text": row[1], "response": row[2], "created_at": row[3]}
+
+    def enqueue_bot_command(self, day: str, request_id: str, sender: str, text: str) -> bool:
+        request_id = str(request_id or "").strip()
+        sender = str(sender or "").strip()
+        text = str(text or "").strip()
+        day = str(day or "").strip()
+        if not request_id or not sender or not text or not day:
+            raise ValueError("机器人命令缺少 request_id、sender、text 或 day")
+        cursor = self.db.execute(
+            "INSERT OR IGNORE INTO bot_commands(request_id, account_id, day, sender, text) VALUES (?, ?, ?, ?, ?)",
+            (request_id, self.account_id, day, sender, text),
+        )
+        self.db.commit()
+        return cursor.rowcount == 1
+
+    def pending_bot_commands(self, day: str, limit: int = 20) -> list[dict]:
+        if limit <= 0:
+            return []
+        rows = self.db.execute(
+            "SELECT request_id, account_id, day, sender, text, status, response, received_at, claimed_at, handled_at "
+            "FROM bot_commands WHERE account_id=? AND day=? AND status='pending' ORDER BY id LIMIT ?",
+            (self.account_id, str(day), int(limit)),
+        ).fetchall()
+        return [_bot_command_from_row(row) for row in rows]
+
+    def claim_bot_command(self, request_id: str) -> bool:
+        cursor = self.db.execute(
+            "UPDATE bot_commands SET status='processing', claimed_at=? "
+            "WHERE request_id=? AND account_id=? AND status='pending'",
+            (datetime.now().isoformat(timespec="seconds"), str(request_id), self.account_id),
+        )
+        self.db.commit()
+        return cursor.rowcount == 1
+
+    def complete_bot_command(self, request_id: str, status: str, response: dict) -> None:
+        if status not in {"completed", "failed"}:
+            raise ValueError("机器人命令完成状态必须是 completed 或 failed")
+        self.db.execute(
+            "UPDATE bot_commands SET status=?, response=?, handled_at=? "
+            "WHERE request_id=? AND account_id=?",
+            (
+                status,
+                json.dumps(response if isinstance(response, dict) else {}, ensure_ascii=False),
+                datetime.now().isoformat(timespec="seconds"),
+                str(request_id),
+                self.account_id,
+            ),
+        )
+        self.db.commit()
+
+    def get_bot_command(self, request_id: str):
+        row = self.db.execute(
+            "SELECT request_id, account_id, day, sender, text, status, response, received_at, claimed_at, handled_at "
+            "FROM bot_commands WHERE request_id=? AND account_id=?",
+            (str(request_id), self.account_id),
+        ).fetchone()
+        return _bot_command_from_row(row) if row is not None else None
 
     def scheduler_run(self, date):
         row = self.db.execute("SELECT date, status, summary FROM scheduler_runs WHERE date=?", (date,)).fetchone()
@@ -254,6 +320,7 @@ class Repository:
             "DELETE FROM scheduler_runs WHERE date=?", (date,)
         ).rowcount
         self.db.execute("DELETE FROM dynamic_sessions WHERE date=?", (date,))
+        self.db.execute("DELETE FROM bot_commands WHERE account_id=? AND day=?", (self.account_id, date))
         self.db.execute(
             "DELETE FROM dynamic_cancellations WHERE date=? AND account_id=?",
             (date, self.account_id),
@@ -355,3 +422,12 @@ def _to_minutes(value: str) -> int:
 
 def _from_minutes(value: int) -> str:
     return f"{value // 60:02d}:{value % 60:02d}"
+
+
+def _bot_command_from_row(row) -> dict:
+    if row is None:
+        return None
+    return dict(zip(
+        ("request_id", "account_id", "day", "sender", "text", "status", "response", "received_at", "claimed_at", "handled_at"),
+        row,
+    ))

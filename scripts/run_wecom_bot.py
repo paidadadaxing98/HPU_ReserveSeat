@@ -1,6 +1,7 @@
 """Run the WeCom smart-bot long-connection service."""
 
 import argparse
+from datetime import date
 import logging
 import sys
 import threading
@@ -11,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from seat_assistant.config import load_accounts, load_settings
+from seat_assistant.storage import Repository
 from seat_assistant.wecom_bot import (
     AccountRecipientResolver,
     OfficialSdkTransport,
@@ -28,10 +30,23 @@ def build_runner(settings=None, accounts=None, sleep=None):
         bot_outbox_dir=getattr(settings, "wecom_bot_outbox_dir", "logs/wecom-bot-outbox"),
     )
     resolver = AccountRecipientResolver(accounts, settings.wecom_bot_default_user)
+    repositories = {
+        account.id: Repository(str(account.db_path), account.id)
+        for account in accounts
+        if getattr(account, "db_path", None)
+    }
+
+    def submit_command(account_id, request_id, sender, text):
+        repository = repositories.get(account_id)
+        if repository is None:
+            return False
+        return repository.enqueue_bot_command(date.today().isoformat(), request_id, sender, text)
+
     router = WeComCommandRouter(
         resolver,
         send_to_user=transport.send_to_user,
         reply=transport.reply,
+        command_submitter=submit_command,
     )
     return WeComBotRunner(
         bot_id=settings.wecom_bot_id,

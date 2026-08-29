@@ -1,8 +1,10 @@
 """Shared dynamic compensation controller for one account and its periods."""
 
 from datetime import date, datetime, timedelta
+import logging
 
 from .access_records import first_entry_time
+from .commands import REMOTE_COMMAND_KINDS, parse_command
 from .dynamic_compensation import (
     Decision,
     DecisionKind,
@@ -21,6 +23,9 @@ class DynamicMonitor:
         self.service = service
         self.settings = service.settings
 
+    def has_pending_commands(self, day: str) -> bool:
+        return bool(self.service.repo.pending_bot_commands(day, limit=1))
+
     def tick(
         self,
         day: str,
@@ -30,18 +35,22 @@ class DynamicMonitor:
         reservation_records: list[dict] | None = None,
         reservation_error: str = "",
     ) -> dict:
+        command_results = self._process_pending_commands(day, now)
         enabled = [
             (name, period)
             for name, period in self.settings.periods.items()
             if getattr(period, "enabled", True)
         ]
         if not self.settings.dynamic_compensation_enabled or len(enabled) > self.settings.dynamic_max_periods:
-            return {
+            result = {
                 "status": "disabled",
                 "message": "启用时段超过动态补偿上限，全部使用静态预约",
             }
+            if command_results:
+                result["commands"] = command_results
+            return result
         entry_at = first_entry_time(records or [], day)
-        results = {}
+        results = {"commands": command_results} if command_results else {}
         for period_name, _period in enabled:
             session = self._ensure_session(day, period_name)
             if session is None:
@@ -239,6 +248,8 @@ class DynamicMonitor:
         records: list[dict] | None = None,
         reservation_records: list[dict] | None = None,
     ) -> bool:
+        if self.has_pending_commands(day):
+            return True
         entry_at = first_entry_time(records or [], day)
         for session in self.service.repo.dynamic_sessions(day):
             if session["status"] == "entered":
@@ -274,6 +285,8 @@ class DynamicMonitor:
 
     def next_poll_delay(self, day: str, now: datetime):
         delays = []
+        if self.has_pending_commands(day):
+            delays.append(timedelta(seconds=self.settings.dynamic_boundary_poll_seconds))
         for session in self.service.repo.dynamic_sessions(day):
             if session["status"] == "entered":
                 delays.append(timedelta(seconds=self.settings.dynamic_boundary_poll_seconds))
@@ -294,6 +307,48 @@ class DynamicMonitor:
                 )
             )
         return min(delays) if delays else None
+
+    def _process_pending_commands(self, day: str, now: datetime) -> list[str]:
+        results = []
+        for item in self.service.repo.pending_bot_commands(day):
+            if not self.service.repo.claim_bot_command(item["request_id"]):
+                continue
+            command = None
+            try:
+                command = parse_command(item["text"])
+                if command.kind not in REMOTE_COMMAND_KINDS:
+                    response = {"ok": False, "message": "该命令不在手机控制白名单中。"}
+                else:
+                    response = self.service.apply_command(command, day)
+            except Exception as exc:
+                response = {"ok": False, "message": f"命令执行异常：{exc}"}
+            status = "completed" if response.get("ok") else "failed"
+            self.service.repo.complete_bot_command(item["request_id"], status, response)
+            text = _format_bot_command_result(item["text"], response)
+            results.append(text)
+            self._notify_command_result(text)
+            if response.get("ok") and command is not None and command.kind in {"cancel", "cancel_day"}:
+                periods = [command.period] if command.period else list(self.settings.periods)
+                for period_name in periods:
+                    if self.service.repo.get_dynamic_session(day, period_name) is not None:
+                        self.service.repo.update_dynamic_session(
+                            day,
+                            period_name,
+                            status="cancelled",
+                            last_action_at=now.isoformat(timespec="seconds"),
+                            message="已通过企业微信命令取消预约",
+                        )
+        return results
+
+    def _notify_command_result(self, text: str) -> None:
+        notifier = getattr(self.service, "notifier", None)
+        send = getattr(notifier, "send", None)
+        if send is None:
+            return
+        try:
+            send(text)
+        except Exception:
+            logging.getLogger(__name__).warning("企业微信命令结果通知失败", exc_info=True)
 
     def _temporary_leave_decision(
         self,
@@ -351,3 +406,20 @@ class DynamicMonitor:
             window_end.isoformat(timespec="seconds"),
         )
         return self.service.repo.get_dynamic_session(day, period_name)
+
+
+def _format_bot_command_result(command_text: str, response: dict) -> str:
+    message = str(response.get("message") or "").strip()
+    if message:
+        return f"{command_text}：{message}"
+    reservations = response.get("reservations")
+    if isinstance(reservations, list):
+        if not reservations:
+            return f"{command_text}：当前没有预约记录。"
+        lines = []
+        for row in reservations:
+            if not isinstance(row, (list, tuple)) or len(row) < 4:
+                continue
+            lines.append(f"{row[0]} {row[1]} {row[2]}-{row[3]}")
+        return f"{command_text}：" + ("；".join(lines) if lines else "当前没有可显示的预约记录。")
+    return f"{command_text}：已处理。"
