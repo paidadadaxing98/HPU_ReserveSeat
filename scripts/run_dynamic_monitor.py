@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from seat_assistant.access_records import AuthenticationError, BrowserAccessRecordProvider
+from seat_assistant.config import is_account_enabled
 from seat_assistant.dynamic_monitor import DynamicMonitor
 from seat_assistant.main import build_services
 from seat_assistant.runtime_logging import attach_file_log, compact_message, format_account_results
@@ -293,6 +294,16 @@ async def run_account(
 ) -> dict:
     event_writer = _default_event_writer if event_writer is None else event_writer
     clock = datetime.now if clock is None else clock
+    account_id = getattr(getattr(service, "settings", None), "account_id", "") or "default"
+
+    def account_disabled() -> bool:
+        # Re-read the flag every cycle: a 关闭账号 issued while this monitor
+        # runs must stop it from re-booking or otherwise managing the account.
+        return not is_account_enabled(account_id)
+
+    if account_disabled():
+        _emit_event(service, event_writer, "account_disabled", day=day, status="stopped")
+        return {"status": "stopped", "message": "账号已关闭，动态监控停止。"}
     monitor = DynamicMonitor(service)
     _emit_event(service, event_writer, "monitor_start", day=day)
     prepare_kwargs = {"target_period": target_period} if target_period is not None else {}
@@ -321,6 +332,9 @@ async def run_account(
             now = clock()
             if deadline is not None and now >= deadline:
                 return last_result
+            if account_disabled():
+                _emit_event(service, event_writer, "account_disabled", day=day, status="stopped")
+                return {"status": "stopped", "message": "账号已关闭，动态监控停止。"}
             if not first_cycle:
                 prepared = monitor.prepare(day, **prepare_kwargs)
                 pending_commands = pending_commands_exist()

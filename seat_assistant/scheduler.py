@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 import time
 
+from .commands import parse_command
 from .initialization import initialization_skip_message
 from .notifications import send_scheduler_notification
 
@@ -8,6 +9,70 @@ from .notifications import send_scheduler_notification
 def next_booking_time(now: datetime) -> datetime:
     target = now.replace(hour=19, minute=30, second=0, microsecond=0)
     return target if now <= target else target + timedelta(days=1)
+
+
+def _apply_pending_cancels(service, day: str, periods, persist_results: bool = True):
+    """Honor pending cancel commands before any booking decision.
+
+    Date-scoped cancel commands (取消MM-DD上午) are queued under their target
+    day. Every covered period without an active reservation gets a terminal
+    "cancelled" record so this and later triggers skip booking it; a command
+    covering a single period is completed right away. cancel_day commands
+    stay pending so the monitor or bot fallback can still cancel remotely if
+    an active reservation turns up.
+    """
+    try:
+        items = service.repo.pending_bot_commands(day)
+    except Exception:
+        return
+    if not items:
+        return
+    period_names = [
+        name for name, period in periods if getattr(period, "enabled", True)
+    ]
+    for item in items:
+        try:
+            command = parse_command(item["text"])
+        except Exception:
+            continue
+        if command.kind == "cancel_day":
+            covered = list(period_names)
+        elif command.kind == "cancel" and command.period in period_names:
+            covered = [command.period]
+        else:
+            continue
+        blocked = False
+        for name in covered:
+            existing = service.repo.get_reservation(day, name)
+            if existing is not None and existing["status"] in {"reserved", "pending", "uncertain"}:
+                # An active reservation exists: the monitor or bot fallback
+                # must cancel it remotely; keep the command pending.
+                blocked = True
+                continue
+            if persist_results:
+                service.repo.save_reservation(
+                    day,
+                    name,
+                    "cancelled",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "收到取消指令，未预约",
+                )
+        if blocked or command.kind != "cancel":
+            continue
+        service.repo.complete_bot_command(
+            item["request_id"],
+            "completed",
+            {"ok": True, "message": f"已在预约前跳过 {day} {'、'.join(covered)} 的预约。"},
+        )
+        send = getattr(getattr(service, "notifier", None), "send", None)
+        if callable(send):
+            try:
+                send(f"已按要求取消：{day} {'、'.join(covered)} 的预约不会提交。")
+            except Exception:
+                pass
 
 
 def run_once(
@@ -44,6 +109,7 @@ def run_once(
 
     now = now or datetime.now()
     periods = list(service.settings.periods.items())
+    _apply_pending_cancels(service, day, periods, persist_results)
     enabled = [(name, period) for name, period in periods if getattr(period, "enabled", True)]
     results = {
         name: _period_summary("skipped", "该学习时段未启用")
@@ -279,6 +345,7 @@ def _run_target_period(
             return summary
 
     periods = list(service.settings.periods.items())
+    _apply_pending_cancels(service, day, periods, persist_results)
     period_map = dict(periods)
     results = {
         name: _period_summary("skipped", "该学习时段未启用")

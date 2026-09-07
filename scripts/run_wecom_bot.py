@@ -1,7 +1,7 @@
 """Run the WeCom smart-bot long-connection service."""
 
 import argparse
-from datetime import date
+from datetime import date, datetime
 import logging
 import sys
 import threading
@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from seat_assistant.commands import parse_command
+from seat_assistant.commands import Command, parse_command
 from seat_assistant.config import load_account_settings, load_accounts, load_settings, set_account_enabled
 from seat_assistant.domain import build_reservation_for_arrival, parse_hhmm
 from seat_assistant.notifications import WeComNotifier
@@ -35,12 +35,71 @@ from seat_assistant.wecom_bot import (
 COMMAND_FALLBACK_SECONDS = 120
 
 
+def disable_account_cleanup(service):
+    """Cancel today's remaining reservations after an account was disabled.
+
+    Closing an account only stops future booking tasks; a reservation made
+    earlier the same day would otherwise stay active and record a violation
+    when nobody shows up. Dynamic sessions are also marked cancelled so a
+    running monitor does not try to re-manage the account.
+    """
+    day = date.today().isoformat()
+    try:
+        response = service.apply_command(Command("cancel_day"), day)
+    except Exception as exc:
+        response = {"ok": False, "message": f"自动取消异常：{type(exc).__name__}: {compact_message(exc)}"}
+    now_text = datetime.now().isoformat(timespec="seconds")
+    for period_name in getattr(service.settings, "periods", {}) or {}:
+        try:
+            if service.repo.get_dynamic_session(day, period_name) is None:
+                continue
+            service.repo.update_dynamic_session(
+                day,
+                period_name,
+                status="cancelled",
+                last_action_at=now_text,
+                message="账号已关闭，自动取消",
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "关闭账号后清理动态会话失败：%s：%s",
+                period_name,
+                compact_message(exc),
+            )
+    outcome = "已取消" if response.get("ok") else "取消失败"
+    message = f"已关闭账号，当日剩余预约{outcome}：{response.get('message') or '无剩余预约。'}"
+    logging.getLogger(__name__).info("关闭账号清理：%s", compact_message(message, limit=200))
+    send = getattr(service.notifier, "send", None)
+    if callable(send):
+        try:
+            send(message)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("关闭账号清理通知失败：%s", compact_message(exc))
+    return response
+
+
+def _spawn_disable_cleanup(service):
+    """Run the disable cleanup off the bot's message thread.
+
+    The cancellation drives a browser session and can take tens of seconds;
+    blocking the websocket handler here would stall every other command.
+    """
+    account_id = getattr(getattr(service, "settings", None), "account_id", "?")
+    threading.Thread(
+        target=disable_account_cleanup,
+        args=(service,),
+        daemon=True,
+        name=f"disable-cleanup-{account_id}",
+    ).start()
+
+
 def build_runner(
     settings=None,
     accounts=None,
     sleep=None,
     fallback_delay_seconds=COMMAND_FALLBACK_SECONDS,
     command_service_factory=None,
+    run_disable_cleanup=None,
 ):
     settings = settings or load_settings()
     accounts = accounts if accounts is not None else load_accounts()
@@ -92,10 +151,21 @@ def build_runner(
                 if item is None or item["status"] != "pending":
                     return
                 command = parse_command(item["text"])
-                # 取消只由动态监控受理：取消要同步该时段的动态会话状态，
-                # 两个进程各自主导会互相覆盖，因此认领之前先判类型，避免把
-                # 命令留在无人处理的 processing 状态。推迟命令才兜底执行。
-                if command.kind != "delay":
+                # 推迟命令兜底执行；取消命令只在已存在有效预约时兜底远程
+                # 取消（同步动态会话状态），否则保持 pending，让当天预约
+                # 任务在预约前跳过，避免"先取消空预约再照常预约"。
+                if command.kind == "delay":
+                    pass
+                elif command.kind in {"cancel", "cancel_day"}:
+                    periods = [command.period] if command.period else list(getattr(account, "periods", {}) or {})
+                    has_active = any(
+                        (repo.get_reservation(item["day"], period) or {}).get("status")
+                        in {"reserved", "pending", "uncertain"}
+                        for period in periods
+                    )
+                    if not has_active:
+                        return
+                else:
                     return
                 if not repo.claim_bot_command(request_id):
                     return
@@ -104,6 +174,28 @@ def build_runner(
                     repo.complete_bot_command(request_id, "failed", {"ok": False, "message": "未找到可执行命令的账号配置。"})
                     return
                 response = service.apply_command(command, item["day"])
+                if response.get("ok") and command.kind in {"cancel", "cancel_day"}:
+                    # Mirror the dynamic monitor: cancelling remotely must
+                    # also retire the period's dynamic session, otherwise a
+                    # running monitor would try to re-manage it.
+                    periods = [command.period] if command.period else list(getattr(service.settings, "periods", {}) or {})
+                    for period_name in periods:
+                        try:
+                            if service.repo.get_dynamic_session(item["day"], period_name) is None:
+                                continue
+                            service.repo.update_dynamic_session(
+                                item["day"],
+                                period_name,
+                                status="cancelled",
+                                last_action_at=datetime.now().isoformat(timespec="seconds"),
+                                message="已通过企业微信命令取消预约",
+                            )
+                        except Exception as exc:
+                            logging.getLogger(__name__).warning(
+                                "兜底取消后清理动态会话失败：%s：%s",
+                                period_name,
+                                compact_message(exc),
+                            )
                 status = "completed" if response.get("ok") else "failed"
                 repo.complete_bot_command(request_id, status, response)
                 message = f"{item['text']}：{response.get('message') or '已处理。'}"
@@ -131,7 +223,15 @@ def build_runner(
         repository = repositories.get(account_id)
         if repository is None:
             return False
-        queued = repository.enqueue_bot_command(date.today().isoformat(), request_id, sender, text)
+        # Date-scoped cancels (取消MM-DD上午) are bound to their target day so
+        # that day's booking task and monitor pick them up; everything else
+        # stays bound to the send day.
+        try:
+            command = parse_command(text)
+        except Exception:
+            command = None
+        day = (command.day if command is not None and command.day else None) or date.today().isoformat()
+        queued = repository.enqueue_bot_command(day, request_id, sender, text)
         if queued and fallback_delay_seconds is not None:
             account = next((item for item in accounts if item.id == account_id), None)
             if account is not None and getattr(account, "enabled", True):
@@ -166,14 +266,31 @@ def build_runner(
         return True
 
     def toggle_account(account_id, enabled):
-        set_account_enabled(account_id, enabled)
-        # Keep this process's view consistent; other processes pick the flag
-        # up when they next start.
+        service = None
+        if enabled:
+            set_account_enabled(account_id, True)
+        else:
+            # Build the real service before the flag flip: after it the
+            # account no longer resolves from accounts.json.
+            try:
+                service = get_command_service(account_id)
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "关闭账号前构建清理服务失败：%s：%s",
+                    account_id,
+                    compact_message(exc),
+                )
+            set_account_enabled(account_id, False)
+        # Keep this process's view consistent; other processes re-read the
+        # flag per task trigger or monitor cycle.
         for item in accounts:
             if item.id == account_id:
                 # AccountSettings is frozen; keep the same object so the
                 # resolver and command handlers see the new flag.
                 object.__setattr__(item, "enabled", enabled)
+        if not enabled and service is not None:
+            cleanup = run_disable_cleanup or _spawn_disable_cleanup
+            cleanup(service)
         return True
 
     router = WeComCommandRouter(

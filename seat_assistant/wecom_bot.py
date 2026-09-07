@@ -505,10 +505,16 @@ class WeComCommandRouter:
                 reply(message, f"账号启用状态修改失败：{exc}。")
                 return False
             action = "启用" if enabling else "关闭"
-            reply(message, (
-                f"已{action}账号 {recipient.account_id}。对下次启动的预约/监控任务生效；"
-                f"如需恢复请发送 启用账号。"
-            ))
+            if enabling:
+                reply(message, (
+                    f"已启用账号 {recipient.account_id}。对下次启动的预约/监控任务生效；"
+                    f"如需再次关闭请发送 关闭账号。"
+                ))
+            else:
+                reply(message, (
+                    f"已关闭账号 {recipient.account_id}，正在运行的监控会自动停止，"
+                    f"当日剩余预约将自动取消，结果稍后通知；如需恢复请发送 启用账号。"
+                ))
             return True
         if command.kind in REMOTE_COMMAND_KINDS:
             recipient = self.resolver.resolve_sender(message.sender)
@@ -536,8 +542,9 @@ class WeComCommandRouter:
                 message.sender,
                 message.text.strip(),
             )
+            day_note = f"目标日期 {command.day}，" if command.day else ""
             reply(message, (
-                f"已收到命令：{message.text.strip()}。已写入本地数据库，等待动态监控受理。"
+                f"已收到命令：{message.text.strip()}。{day_note}已写入本地数据库，等待动态监控受理。"
                 if queued else "该命令已收到，数据库中已有记录，未重复执行。"
             ))
             return True

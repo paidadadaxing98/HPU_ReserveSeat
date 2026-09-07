@@ -439,8 +439,9 @@ def load_accounts(path: str | None = None) -> list[AccountSettings]:
 def set_account_enabled(account_id: str, enabled: bool, path: str | None = None) -> bool:
     """Flip an account's enabled flag in accounts.json and persist it.
 
-    Running processes load their account list at startup, so the change
-    applies to tasks launched afterwards.
+    Scheduled booking tasks read this file in a fresh process per trigger,
+    and the dynamic monitor re-reads the flag every poll cycle, so the
+    change takes effect without restarting anything.
     """
     config_path = Path(path or os.getenv("SEAT_ACCOUNTS_FILE", "accounts.json")).resolve()
     if not config_path.exists():
@@ -457,8 +458,36 @@ def set_account_enabled(account_id: str, enabled: bool, path: str | None = None)
             break
     if not found:
         raise ValueError(f"账号配置中没有账号 {account_id}")
-    config_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Write via a temp file + atomic replace so a monitor reading the flag
+    # mid-write never observes a truncated accounts.json.
+    temp_path = config_path.with_suffix(config_path.suffix + ".tmp")
+    temp_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temp_path, config_path)
     return enabled
+
+
+def is_account_enabled(account_id: str, path: str | None = None) -> bool:
+    """Read an account's enabled flag fresh from accounts.json.
+
+    Long-running processes call this per cycle so a mid-run 关闭账号
+    takes effect without a restart. Returns True when the flag cannot be
+    determined (single .env account mode, unreadable file, unknown id) so
+    a transient read failure never freezes an active monitor.
+    """
+    config_path = Path(path or os.getenv("SEAT_ACCOUNTS_FILE", "accounts.json")).resolve()
+    if not config_path.exists():
+        return True
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    entries = raw.get("accounts") if isinstance(raw, dict) else raw
+    if not isinstance(entries, list):
+        return True
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("id") == account_id:
+            return entry.get("enabled", True) is not False
+    return True
 
 
 def load_settings() -> Settings:

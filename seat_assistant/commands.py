@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import re
 
 
@@ -11,11 +11,15 @@ REMOTE_COMMAND_HELP = (
     "状态\n"
     "今天不去了\n"
     "取消【上午/下午/晚上】\n"
+    "取消MM-DD【上午/下午/晚上】（按日期取消，如 取消09-08上午；省略时段取消全天）\n"
     "【上午/下午/晚上】推迟到 HH:MM[-HH:MM]（按时段直接预约，最长4小时）\n"
     "以后【上午/下午/晚上】默认到馆时间为 HH:MM[-HH:MM]（后半为默认结束时间）\n"
     "启用账号 / 关闭账号 [账号或别名]"
 )
 BOT_COMMAND_HELP = REMOTE_COMMAND_HELP + "\n推文 【账号或别名】 标题 | 链接 [| 备注]"
+
+DATE_CANCEL_WINDOW_DAYS = 7
+
 
 @dataclass(frozen=True)
 class Command:
@@ -27,6 +31,8 @@ class Command:
     title: str | None = None
     url: str | None = None
     note: str | None = None
+    # Target date (ISO) for date-scoped cancel commands; None means "today".
+    day: str | None = None
 
 
 def parse_command(text: str) -> Command:
@@ -73,6 +79,14 @@ def parse_command(text: str) -> Command:
     match = re.match(r"取消(上午|下午|晚上)$", text)
     if match:
         return Command("cancel", PERIODS[match.group(1)])
+    match = re.match(r"取消(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2})(上午|下午|晚上)$", text)
+    if match:
+        day = _resolve_cancel_day(match.group(1))
+        return Command("cancel", PERIODS[match.group(2)], day=day) if day else Command("help")
+    match = re.match(r"取消(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2})$", text)
+    if match:
+        day = _resolve_cancel_day(match.group(1))
+        return Command("cancel_day", day=day) if day else Command("help")
     match = re.match(r"(启用|关闭)账号\s*(\S+)?$", text)
     if match:
         kind = "enable_account" if match.group(1) == "启用" else "disable_account"
@@ -80,6 +94,26 @@ def parse_command(text: str) -> Command:
     if text in {"状态", "查看状态"}:
         return Command("status")
     return Command("help")
+
+
+def _resolve_cancel_day(value: str) -> str | None:
+    """Normalize a cancel date (YYYY-MM-DD or MM-DD) to ISO, today..+7 days.
+
+    Returns None for anything outside the window so the command is rejected
+    with the help reply instead of silently cancelling the wrong day.
+    """
+    parts = value.split("-")
+    try:
+        if len(parts) == 3:
+            resolved = date(int(parts[0]), int(parts[1]), int(parts[2]))
+        else:
+            resolved = date(date.today().year, int(parts[0]), int(parts[1]))
+    except ValueError:
+        return None
+    today = date.today()
+    if not today <= resolved <= today + timedelta(days=DATE_CANCEL_WINDOW_DAYS):
+        return None
+    return resolved.isoformat()
 
 
 def _parse_push_tweet(text: str) -> Command:
