@@ -40,7 +40,11 @@ def reservation_start_for_arrival(expected_arrival: time, arrival_window: tuple[
     """Choose a site's half-hour start whose check-in window covers arrival."""
     arrival_minutes = _minutes(expected_arrival)
     window_start, window_end = map(_minutes, arrival_window)
-    if not window_start <= arrival_minutes <= window_end:
+    # The site's check-in window starts 30 minutes before the reservation
+    # start.  Allow the configured period's first reservation node to be
+    # selected from that early check-in range (for example, 14:05 -> 14:00),
+    # while keeping the configured period end as a hard upper bound.
+    if not window_start - 30 <= arrival_minutes <= window_end:
         raise ValueError("预计到馆时间不在到馆区间内")
 
     # The latest valid start is 15 minutes before arrival. Round that boundary
@@ -48,9 +52,19 @@ def reservation_start_for_arrival(expected_arrival: time, arrival_window: tuple[
     candidate_minutes = ((arrival_minutes - 15 + 29) // 30) * 30
     candidate = _time(candidate_minutes)
     lower, upper = check_in_window(candidate)
-    if candidate_minutes > window_end or not (_minutes(lower) <= arrival_minutes <= _minutes(upper)):
+    if candidate_minutes < window_start - 30 or candidate_minutes > window_end or not (_minutes(lower) <= arrival_minutes <= _minutes(upper)):
         raise ValueError("预计到馆时间无法匹配半小时预约开始时间")
     return candidate
+
+
+def build_reservation_for_arrival(
+    expected_arrival: time,
+    arrival_window: tuple[time, time],
+    desired_end: time,
+) -> Reservation:
+    """Build the actual reservation after validating its arrival time."""
+    start = reservation_start_for_arrival(expected_arrival, arrival_window)
+    return build_reservation(start, desired_end)
 
 
 def parse_hhmm(value: str) -> time:

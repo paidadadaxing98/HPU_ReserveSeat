@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from seat_assistant.config import _load_dotenv
 from seat_assistant.main import build_services
+from seat_assistant.runtime_logging import compact_message, format_account_results
 from seat_assistant.scheduler import run_accounts_once
 
 TRIGGER_WINDOWS = {
@@ -70,7 +71,7 @@ def run_trigger(
         target_period=target_period,
         persist_results=not dry_run,
     )
-    print(f"无人值守预约结束：{results}")
+    print(format_account_results(results, prefix="预约结束"))
     return 0
 
 
@@ -110,7 +111,7 @@ def _start_wecom_bot_if_configured(settings):
             cwd=str(root),
         )
     except Exception as exc:
-        print(f"企业微信机器人启动失败：{exc}")
+        print(f"企业微信机器人启动失败：{compact_message(exc)}")
         return None
 
 
@@ -141,7 +142,7 @@ def main(argv=None) -> int:
                 )
     except Exception as exc:
         with path.open("a", encoding="utf-8") as stream:
-            print(f"[{datetime.now().isoformat(timespec='seconds')}] 定时任务异常：{exc}", file=stream)
+            print(f"[{datetime.now().isoformat(timespec='seconds')}] 定时任务异常：{compact_message(exc)}", file=stream)
         return 1
 
 

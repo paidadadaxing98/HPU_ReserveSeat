@@ -18,15 +18,20 @@ _ACTIVE_RESERVATION_STATUSES = frozenset({
     "生效",
 })
 _IN_USE_RESERVATION_STATUSES = frozenset({
+    "AWAY",
     "CHECK_IN",
     "IN_USE",
     "USING",
+    "暂离",
     "签到成功",
     "使用中",
     "履约中",
 })
 _COMPLETED_RESERVATION_STATUSES = frozenset({"COMPLETE", "COMPLETED", "履约完成", "已履约"})
-_MISSED_RESERVATION_STATUSES = frozenset({"AWAY", "MISSED", "失约"})
+# The site reports an unattended reservation as MISS; STOP is a booking the
+# site terminated (temporary leave exceeded its limit).  Temporary leave
+# itself is AWAY and stays an in-use state so the leave guard still applies.
+_MISSED_RESERVATION_STATUSES = frozenset({"MISS", "MISSED", "STOP", "失约", "已失约", "终止"})
 _CANCELLED_RESERVATION_STATUSES = frozenset({"CANCEL", "CANCELLED", "CANCELED", "已取消"})
 _LOCAL_RETRY_BLOCKING_STATUSES = frozenset({"reserved", "pending", "uncertain"})
 
@@ -79,6 +84,84 @@ def find_matching_reservation(
         if existing_start == requested_start and existing_end == requested_end:
             return item
     return None
+
+
+def find_cancelable_reservation(
+    reservations: list[dict],
+    day: str,
+    expected: dict,
+) -> dict | None:
+    """Find the one live booking safe to cancel.
+
+    Monitoring may use a time-only fallback when the site changes its
+    location presentation. Cancellation cannot use that fallback because a
+    different seat can have the same interval. A saved seat is therefore
+    required, and CHECK_IN remains a live state while the booking is in use.
+    """
+    expected_start = _clock_minutes(expected.get("start", ""))
+    expected_end = _clock_minutes(expected.get("end", ""))
+    expected_seat = _normalize_seat(_value_text(expected.get("seat", "")))
+    expected_room = _normalize_room(expected.get("room", ""))
+    if expected_end is None or not expected_seat:
+        return None
+    matches = []
+    for item in _unique_matching_records(reservations):
+        if not isinstance(item, dict) or _extract_date(item) != day:
+            continue
+        if reservation_state(item) not in {"reserved", "in_use"}:
+            continue
+        actual_start = _extract_time(item, ("startTime", "start_time", "start", "beginTime", "begin"))
+        actual_end = _extract_time(item, ("endTime", "end_time", "end", "finishTime", "finish"))
+        if actual_end != expected_end or (expected_start is not None and actual_start != expected_start):
+            continue
+        if not _seats_match(_extract_seat(item), expected_seat):
+            continue
+        # Seat number identifies the booking. The room text is a display
+        # field and can change between the history and current endpoints.
+        matches.append(item)
+    return matches[0] if len(matches) == 1 else None
+
+
+def find_confirmed_reservation(
+    reservations: list[dict],
+    day: str,
+    expected: dict,
+) -> dict | None:
+    """Confirm a submitted booking without selecting another seat.
+
+    This is used after reserve requests and during reconciliation. It may
+    accept a unique time match when the user's endpoint omitted location
+    fields, but it rejects a visible different seat. Destructive operations
+    must use ``find_cancelable_reservation`` instead.
+    """
+    expected_start = _clock_minutes(expected.get("start", ""))
+    expected_end = _clock_minutes(expected.get("end", ""))
+    expected_seat = _normalize_seat(_value_text(expected.get("seat", "")))
+    expected_room = _normalize_room(expected.get("room", ""))
+    if expected_end is None:
+        return None
+    strict = find_cancelable_reservation(reservations, day, expected)
+    if strict is not None:
+        return strict
+
+    matches = []
+    for item in _unique_matching_records(reservations):
+        if not isinstance(item, dict) or _extract_date(item) != day:
+            continue
+        if reservation_state(item) not in {"reserved", "in_use"}:
+            continue
+        actual_start = _extract_time(item, ("startTime", "start_time", "start", "beginTime", "begin"))
+        actual_end = _extract_time(item, ("endTime", "end_time", "end", "finishTime", "finish"))
+        if actual_end != expected_end or (expected_start is not None and actual_start != expected_start):
+            continue
+        actual_seat = _extract_seat(item)
+        actual_room = _extract_room(item)
+        if expected_seat and actual_seat and not _seats_match(actual_seat, expected_seat):
+            continue
+        if not expected_seat and expected_room and actual_room and not _room_matches(actual_room, expected_room):
+            continue
+        matches.append(item)
+    return matches[0] if len(matches) == 1 else None
 
 
 def find_reservation_by_day_and_time(
@@ -140,14 +223,21 @@ def find_reservation_by_day_and_end(
 
 
 def _record_identity(item: dict) -> str:
-    for key in ("id", "reservationId", "reserveId", "recordId"):
-        value = item.get(key)
-        if value not in (None, ""):
-            return f"{key}:{value}"
+    identifier = _record_identifier(item)
+    if identifier:
+        return f"id:{identifier}"
     return "|".join(
         _value_text(item.get(key))
         for key in ("date", "begin", "end", "loc", "location", "seatNumber", "seatNo")
     )
+
+
+def _record_identifier(item: dict) -> str:
+    for key in ("id", "reservationId", "reserveId", "recordId"):
+        value = item.get(key)
+        if value not in (None, ""):
+            return _value_text(value)
+    return ""
 
 
 def active_reservations_for_day(reservations: list[dict], day: str) -> list[dict]:
@@ -243,6 +333,7 @@ def reservation_state(item: dict) -> str:
 
 def find_reservation_record(records: list[dict], day: str, expected: dict) -> dict | None:
     """Return the unique history row matching one local reservation."""
+    records = _unique_matching_records(records)
     matches = [
         item for item in records or []
         if isinstance(item, dict)
@@ -255,7 +346,95 @@ def find_reservation_record(records: list[dict], day: str, expected: dict) -> di
         item for item in matches
         if reservation_state(item) in {"reserved", "in_use"}
     ]
-    return live_matches[0] if len(live_matches) == 1 else None
+    if len(live_matches) == 1:
+        return live_matches[0]
+
+    # A reloaded page can return a different room/seat presentation from the
+    # one saved locally. The reservation endpoints are scoped to this
+    # account, so a unique active row at the exact interval is our booking
+    # even when the seat number is rendered differently; the monitor syncs
+    # that display drift back to the local row instead of losing track of a
+    # live reservation.
+    expected_start = _clock_minutes(expected.get("start", ""))
+    expected_end = _clock_minutes(expected.get("end", ""))
+    interval_matches = []
+    for item in records or []:
+        if not isinstance(item, dict) or _extract_date(item) != day:
+            continue
+        if reservation_state(item) not in {"reserved", "in_use"}:
+            continue
+        actual_start = _extract_time(item, ("startTime", "start_time", "start", "beginTime", "begin"))
+        actual_end = _extract_time(item, ("endTime", "end_time", "end", "finishTime", "finish"))
+        if expected_end is None or actual_end != expected_end:
+            continue
+        if expected_start is not None and actual_start != expected_start:
+            continue
+        interval_matches.append(item)
+    return interval_matches[0] if len(interval_matches) == 1 else None
+
+
+def _unique_matching_records(records: list[dict] | None) -> list[dict]:
+    """Collapse duplicate views of one site reservation before matching.
+
+    The monitor may combine the paginated history response with the current
+    reservations response.  Those responses can describe the same booking
+    with different optional fields, so exact JSON de-duplication is not enough.
+    """
+    unique = []
+    positions = {}
+    for item in records or []:
+        if not isinstance(item, dict):
+            continue
+        key = _matching_record_key(item)
+        if key in positions:
+            index = positions[key]
+            first = unique[index]
+            if reservation_state(first) != reservation_state(item):
+                unique[index] = _merge_record_views(first, item)
+            continue
+        positions[key] = len(unique)
+        unique.append(item)
+    return unique
+
+
+def _matching_record_key(item: dict) -> tuple:
+    identifier = _record_identifier(item)
+    if identifier:
+        return ("id", identifier)
+    return (
+        "interval",
+        _extract_date(item),
+        _extract_time(item, ("startTime", "start_time", "start", "beginTime", "begin")),
+        _extract_time(item, ("endTime", "end_time", "end", "finishTime", "finish")),
+        _extract_room(item),
+        _extract_seat(item),
+    )
+
+
+def _merge_record_views(first: dict, second: dict) -> dict:
+    """Merge duplicate API views, keeping the most current business state."""
+    first_state = reservation_state(first)
+    second_state = reservation_state(second)
+    priority = {
+        "unknown": 0,
+        "cancelled": 1,
+        "missed": 2,
+        "completed": 3,
+        "reserved": 4,
+        "in_use": 5,
+    }
+    preferred, other = (
+        (second, first)
+        if priority.get(second_state, 0) > priority.get(first_state, 0)
+        else (first, second)
+    )
+    merged = dict(preferred)
+    for key, value in other.items():
+        if key in {"stat", "status", "state", "reservationStatus", "reserveStatus", "bookingStatus"}:
+            continue
+        if merged.get(key) in (None, "") and value not in (None, ""):
+            merged[key] = value
+    return merged
 
 
 def find_reservation_state(records: list[dict], day: str, expected: dict) -> str | None:
@@ -411,11 +590,14 @@ def _reservation_matches_expected(item: dict, expected: dict) -> bool:
         return False
     expected_room = _normalize_room(expected.get("room", ""))
     actual_room = _extract_room(item)
-    if expected_room and actual_room and not _room_matches(actual_room, expected_room):
-        return False
     expected_seat = _normalize_seat(_value_text(expected.get("seat", "")))
     actual_seat = _extract_seat(item)
-    if expected_seat and actual_seat and not _seats_match(actual_seat, expected_seat):
+    if expected_seat:
+        # Seat is the stable identity across the site's different location
+        # presentations. An explicit seat mismatch must remain a mismatch.
+        if actual_seat and not _seats_match(actual_seat, expected_seat):
+            return False
+    elif expected_room and actual_room and not _room_matches(actual_room, expected_room):
         return False
     return expected_end is not None and actual_end is not None
 

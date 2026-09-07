@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from seat_assistant.auth_flow import is_seat_app_url
-from seat_assistant.browser_session import LockedBrowser
+from seat_assistant.browser_session import LockedBrowser, prepare_context_page
 from seat_assistant.calibration import sanitize_url
 from seat_assistant.config import _load_dotenv, load_account_settings
 from seat_assistant.initialization import (
@@ -41,7 +41,7 @@ class ReadOnlyAccountVerifier:
 
     async def verify(self) -> dict:
         async with LockedBrowser(Path(self.settings.profile_path)) as context:
-            page = context.pages[0] if context.pages else await context.new_page()
+            page = await prepare_context_page(context)
             auth_state = {"headers": {}, "token": ""}
             capture_tasks = set()
 

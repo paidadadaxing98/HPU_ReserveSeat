@@ -81,12 +81,51 @@ def run_once(
                 "reserved", "已预约" if not _ended(day, record["end"], now) else "预约已结束"
             )
             continue
+        if status in {"pending", "uncertain"} and persist_results:
+            reconciliation = service.reconcile_existing_submission(day, name)
+            if reconciliation is not None:
+                outcome, detail = reconciliation
+                if outcome == "recovered":
+                    results[name] = _period_summary(
+                        "reserved",
+                        detail.message or "已从‘我的预约’确认成功",
+                        True,
+                        detail.room,
+                        detail.seat,
+                    )
+                    continue
+                if outcome == "retry":
+                    # Verified absent in a fresh query: retire the old submit
+                    # and retry instead of leaving an uncertain dead end.
+                    service.repo.save_reservation(
+                        day,
+                        name,
+                        "failed",
+                        record.get("start", ""),
+                        record.get("end", ""),
+                        record.get("room", ""),
+                        record.get("seat", ""),
+                        "上次提交已确认远端无有效预约，准备重试",
+                    )
+                    results[name] = _period_summary("pending", "已确认上次提交不存在，准备重试")
+                    if pending_name is None:
+                        pending_name = name
+                    continue
+                results[name] = _period_summary("pending", detail.message or "无法确认上次提交结果，稍后重查")
+                continue
         if status == "uncertain":
-            results[name] = _period_summary("uncertain", record.get("message") or "预约结果不明确")
+            results[name] = _period_summary("uncertain", record.get("message") or "预约未确认成功")
             # An uncertain result only prevents retrying this period. It must
             # not prevent independent later periods from being attempted.
             continue
         if status == "failed":
+            if not _period_expired(day, _period, now):
+                # Transient glitches and verified-absent submits are retried
+                # while the period window is still open.
+                results[name] = _period_summary("pending", record.get("message") or "上次预约失败，本轮重试")
+                if pending_name is None:
+                    pending_name = name
+                continue
             results[name] = _period_summary("failed", record.get("message") or "预约失败")
             continue
         results[name] = _period_summary("skipped", record.get("message") or f"已有终态记录：{status}")
@@ -127,19 +166,21 @@ def run_once(
         else:
             summary_status = "progressed"
     elif not result.conclusive:
-        results[pending_name] = _period_summary("uncertain", result.message or "预约结果不明确")
+        record = service.repo.get_reservation(day, pending_name)
+        result_status = record.get("status") if record and record.get("status") == "pending" else "uncertain"
+        results[pending_name] = _period_summary(result_status, result.message or "预约未确认成功")
         record = service.repo.get_reservation(day, pending_name)
         service.repo.save_reservation(
             day,
             pending_name,
-            "uncertain",
+            result_status,
             record["start"] if record else "",
             record["end"] if record else "",
             record["room"] if record else result.room,
             record["seat"] if record else result.seat,
-            result.message or "预约结果不明确",
+            result.message or "预约未确认成功",
         )
-        summary_status = "uncertain"
+        summary_status = result_status
     elif "尚未结束" in str(result.message or ""):
         results[pending_name] = _period_summary("waiting", result.message)
         summary_status = "waiting"
@@ -266,11 +307,52 @@ def _run_target_period(
         return summary
 
     record = service.repo.get_reservation(day, target_period)
+    if record is not None and record["status"] in {"pending", "uncertain"} and persist_results:
+        reconciliation = service.reconcile_existing_submission(day, target_period)
+        if reconciliation is not None:
+            outcome, detail = reconciliation
+            if outcome == "recovered":
+                record = service.repo.get_reservation(day, target_period)
+                results[target_period] = _period_summary(
+                    "reserved",
+                    detail.message or "已从‘我的预约’确认成功",
+                    True,
+                    detail.room,
+                    detail.seat,
+                )
+            elif outcome == "retry":
+                # A fresh query proved the earlier submit never landed.
+                # Retire it and book again instead of dead-ending the period.
+                service.repo.save_reservation(
+                    day,
+                    target_period,
+                    "failed",
+                    record.get("start", ""),
+                    record.get("end", ""),
+                    record.get("room", ""),
+                    record.get("seat", ""),
+                    "上次提交已确认远端无有效预约，准备重试",
+                )
+                record = None
+            else:
+                summary = _finish_summary(
+                    results,
+                    "pending",
+                    service,
+                    detail.message or "无法确认上次提交结果，暂不重复提交",
+                )
+                service.repo.save_scheduler_run(day, "pending", summary)
+                return summary
+    if record is not None and record["status"] == "failed" and not _period_expired(
+        day, period_map[target_period], now
+    ):
+        # Retry a failed submission while the period window is still open.
+        record = None
     if record is not None:
         status = record["status"]
         if status == "uncertain":
             summary_status = "uncertain"
-            summary_message = record.get("message") or "预约结果不明确，已停止后续提交"
+            summary_message = record.get("message") or "预约未确认成功，已停止后续提交"
         elif status == "reserved":
             summary_status = "waiting" if not _ended(day, record["end"], now) else "progressed"
             summary_message = "该时段已预约，避免重复提交"
@@ -279,7 +361,7 @@ def _run_target_period(
             summary_message = record.get("message") or f"该时段已有记录：{status}"
         else:
             summary_status = "waiting"
-            summary_message = record.get("message") or "该时段已有待核验记录"
+            summary_message = record.get("message") or "该时段已有未确认的提交记录"
         summary = _finish_summary(results, summary_status, service, summary_message)
         service.repo.save_scheduler_run(day, summary_status, summary)
         return summary
@@ -322,9 +404,11 @@ def _run_target_period(
             summary_status = "completed" if _all_tasks_reserved(service, day, periods) else "progressed"
             summary_message = "全部启用学习时段已完成" if summary_status == "completed" else "本次已完成一个预约任务，后续时段等待对应计划任务"
     elif not result.conclusive:
-        results[target_period] = _period_summary("uncertain", result.message or "预约结果不明确")
-        summary_status = "uncertain"
-        summary_message = result.message or "预约结果不明确，已停止后续提交"
+        record = service.repo.get_reservation(day, target_period)
+        result_status = record.get("status") if record and record.get("status") == "pending" else "uncertain"
+        results[target_period] = _period_summary(result_status, result.message or "预约未确认成功")
+        summary_status = result_status
+        summary_message = result.message or "预约未确认成功，已停止后续提交"
     elif "尚未结束" in str(result.message or ""):
         results[target_period] = _period_summary("waiting", result.message)
         summary_status = "waiting"
@@ -371,7 +455,7 @@ def _status_message(status: str) -> str:
     return {
         "progressed": "本次已完成一个预约任务，后续时段等待下一次运行",
         "waiting": "前一个预约尚未结束，等待后续运行",
-        "uncertain": "预约结果不明确，已停止后续提交",
+        "uncertain": "预约未确认成功，已停止后续提交",
         "failed": "当前预约任务明确失败，已停止后续提交",
     }.get(status, "")
 

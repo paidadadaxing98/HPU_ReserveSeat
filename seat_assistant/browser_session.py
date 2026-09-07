@@ -11,6 +11,31 @@ from .account_lock import AccountLock
 CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
 
+async def prepare_context_page(context):
+    """Select the seat-app page and close stale popup pages before reuse."""
+    pages = list(getattr(context, "pages", ()) or ())
+    if not pages:
+        return await context.new_page()
+    primary = next(
+        (
+            page for page in pages
+            if "/libseat/" in str(getattr(page, "url", ""))
+        ),
+        pages[0],
+    )
+    for stale_page in pages:
+        if stale_page is primary:
+            continue
+        is_closed = getattr(stale_page, "is_closed", None)
+        if callable(is_closed) and is_closed():
+            continue
+        try:
+            await stale_page.close()
+        except Exception as exc:
+            raise RuntimeError("浏览器存在无法关闭的旧弹出页面") from exc
+    return primary
+
+
 class LockedBrowser:
     def __init__(self, profile: Path, headless: bool = False):
         self.profile = Path(profile)

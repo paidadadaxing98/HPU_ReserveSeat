@@ -8,12 +8,17 @@ browser automation layer.
 import base64
 import json
 import re
+from socket import timeout as SocketTimeout
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
 class CaptchaVisionError(RuntimeError):
     """Raised when the configured vision service cannot produce an answer."""
+
+    def __init__(self, message: str, category: str = "unknown"):
+        super().__init__(message)
+        self.category = category
 
 
 def parse_captcha_answer(raw: str, kind: str) -> str | None:
@@ -64,7 +69,7 @@ class QwenCaptchaClient:
 
     def solve(self, image_bytes: bytes, mime_type: str, kind: str) -> str:
         if not image_bytes:
-            raise CaptchaVisionError("验证码图片为空")
+            raise CaptchaVisionError("验证码图片为空", "input")
         if kind not in {"arithmetic", "letters", "auto"}:
             raise ValueError(f"未知验证码类型：{kind}")
         encoded = base64.b64encode(image_bytes).decode("ascii")
@@ -96,18 +101,35 @@ class QwenCaptchaClient:
         )
         try:
             with self.opener(request, timeout=self.timeout_seconds) as response:
-                response_payload = json.loads(response.read().decode("utf-8"))
+                raw_response = response.read()
         except HTTPError as exc:
-            raise CaptchaVisionError(f"验证码视觉模型请求失败（HTTP {exc.code}）") from exc
-        except (URLError, OSError, TimeoutError, json.JSONDecodeError) as exc:
-            raise CaptchaVisionError("验证码视觉模型请求失败") from exc
+            raise CaptchaVisionError(
+                f"验证码视觉模型 HTTP 错误（{exc.code}）",
+                "http",
+            ) from exc
+        except (TimeoutError, SocketTimeout) as exc:
+            raise CaptchaVisionError("验证码视觉模型请求超时", "timeout") from exc
+        except URLError as exc:
+            if isinstance(getattr(exc, "reason", None), (TimeoutError, SocketTimeout)):
+                raise CaptchaVisionError("验证码视觉模型请求超时", "timeout") from exc
+            raise CaptchaVisionError("验证码视觉模型网络错误", "network") from exc
+        except OSError as exc:
+            raise CaptchaVisionError("验证码视觉模型网络错误", "network") from exc
+        try:
+            response_payload = json.loads(raw_response.decode("utf-8"))
+        except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CaptchaVisionError("验证码视觉模型返回格式错误", "response_format") from exc
         try:
             content = response_payload["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise CaptchaVisionError("验证码视觉模型返回格式无法识别") from exc
+            raise CaptchaVisionError("验证码视觉模型返回格式错误", "response_format") from exc
         if isinstance(content, list):
-            content = "".join(item.get("text", "") for item in content if isinstance(item, dict))
+            content = "".join(
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and isinstance(item.get("text", ""), str)
+            )
         answer = parse_captcha_answer(content, kind)
         if answer is None:
-            raise CaptchaVisionError("验证码视觉模型返回了不合规答案")
+            raise CaptchaVisionError("验证码视觉模型答案不合规", "answer_invalid")
         return answer

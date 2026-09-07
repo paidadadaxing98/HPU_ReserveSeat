@@ -70,11 +70,16 @@ class Settings:
     dynamic_normal_poll_seconds: int = 180
     dynamic_boundary_poll_seconds: int = 120
     dynamic_late_reschedule_minutes: int = 30
+    dynamic_access_check_before_minutes: int = 6
+    dynamic_reservation_first_check_before_minutes: int = 4
+    dynamic_reservation_final_check_before_minutes: int = 2
     dynamic_max_periods: int = 3
     dynamic_reconnect_base_seconds: int = 10
     dynamic_reconnect_max_seconds: int = 300
     dynamic_reconnect_max_attempts: int = 5
     dynamic_manual_login_timeout_seconds: int = 300
+    reservation_verify_attempts: int = 3
+    reservation_max_hours: int = 4
     access_records_url: str = ""
     account_interval_seconds: float = 15.0
     captcha_llm_enabled: bool = False
@@ -109,6 +114,15 @@ class Settings:
             raise ValueError("动态轮询间隔必须大于 0")
         if self.dynamic_late_reschedule_minutes <= 0:
             raise ValueError("动态迟到重约间隔必须大于 0")
+        check_points = (
+            self.dynamic_access_check_before_minutes,
+            self.dynamic_reservation_first_check_before_minutes,
+            self.dynamic_reservation_final_check_before_minutes,
+        )
+        if any(value <= 0 for value in check_points) or not (
+            check_points[0] > check_points[1] > check_points[2]
+        ):
+            raise ValueError("远程检查节点必须按提前分钟数严格递减")
         if not 1 <= self.dynamic_max_periods <= 3:
             raise ValueError("dynamic_max_periods 必须在 1 到 3 之间")
         if self.dynamic_reconnect_base_seconds <= 0:
@@ -119,6 +133,10 @@ class Settings:
             raise ValueError("动态会话重建最大次数必须大于 0")
         if self.dynamic_manual_login_timeout_seconds < 0:
             raise ValueError("动态会话人工登录等待时间不能小于 0")
+        if self.reservation_verify_attempts < 1:
+            raise ValueError("预约核验次数必须大于 0")
+        if not 1 <= self.reservation_max_hours <= 12:
+            raise ValueError("单次预约时长上限必须在 1 到 12 小时之间")
         if self.access_records_url and not self.access_records_url.startswith(("http://", "https://")):
             raise ValueError("门禁记录接口地址必须是 http:// 或 https:// 地址")
         if self.account_interval_seconds < 0:
@@ -418,6 +436,31 @@ def load_accounts(path: str | None = None) -> list[AccountSettings]:
     return accounts
 
 
+def set_account_enabled(account_id: str, enabled: bool, path: str | None = None) -> bool:
+    """Flip an account's enabled flag in accounts.json and persist it.
+
+    Running processes load their account list at startup, so the change
+    applies to tasks launched afterwards.
+    """
+    config_path = Path(path or os.getenv("SEAT_ACCOUNTS_FILE", "accounts.json")).resolve()
+    if not config_path.exists():
+        raise ValueError("当前使用 .env 单账号配置，无法启用/关闭账号")
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    entries = raw.get("accounts") if isinstance(raw, dict) else raw
+    if not isinstance(entries, list):
+        raise ValueError("账号配置必须是 accounts 列表")
+    found = False
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("id") == account_id:
+            entry["enabled"] = enabled
+            found = True
+            break
+    if not found:
+        raise ValueError(f"账号配置中没有账号 {account_id}")
+    config_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+    return enabled
+
+
 def load_settings() -> Settings:
     _load_dotenv()
     return Settings(
@@ -445,11 +488,16 @@ def load_settings() -> Settings:
         dynamic_normal_poll_seconds=int(os.getenv("SEAT_DYNAMIC_NORMAL_POLL_SECONDS", "180")),
         dynamic_boundary_poll_seconds=int(os.getenv("SEAT_DYNAMIC_BOUNDARY_POLL_SECONDS", "120")),
         dynamic_late_reschedule_minutes=int(os.getenv("SEAT_DYNAMIC_LATE_RESCHEDULE_MINUTES", "30")),
+        dynamic_access_check_before_minutes=int(os.getenv("SEAT_DYNAMIC_ACCESS_CHECK_BEFORE_MINUTES", "6")),
+        dynamic_reservation_first_check_before_minutes=int(os.getenv("SEAT_DYNAMIC_RESERVATION_FIRST_CHECK_BEFORE_MINUTES", "4")),
+        dynamic_reservation_final_check_before_minutes=int(os.getenv("SEAT_DYNAMIC_RESERVATION_FINAL_CHECK_BEFORE_MINUTES", "2")),
         dynamic_max_periods=int(os.getenv("SEAT_DYNAMIC_MAX_PERIODS", "3")),
         dynamic_reconnect_base_seconds=int(os.getenv("SEAT_DYNAMIC_RECONNECT_BASE_SECONDS", "10")),
         dynamic_reconnect_max_seconds=int(os.getenv("SEAT_DYNAMIC_RECONNECT_MAX_SECONDS", "300")),
         dynamic_reconnect_max_attempts=int(os.getenv("SEAT_DYNAMIC_RECONNECT_MAX_ATTEMPTS", "5")),
         dynamic_manual_login_timeout_seconds=int(os.getenv("SEAT_DYNAMIC_MANUAL_LOGIN_TIMEOUT_SECONDS", "300")),
+        reservation_verify_attempts=int(os.getenv("SEAT_RESERVATION_VERIFY_ATTEMPTS", "3")),
+        reservation_max_hours=int(os.getenv("SEAT_RESERVATION_MAX_HOURS", "4")),
         access_records_url=os.getenv("SEAT_ACCESS_RECORDS_URL", "").strip(),
         account_interval_seconds=float(os.getenv("SEAT_ACCOUNT_INTERVAL_SECONDS", "15")),
         captcha_llm_enabled=os.getenv("SEAT_CAPTCHA_LLM_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
@@ -501,6 +549,9 @@ def load_account_settings(account_id: str | None = None) -> Settings:
         dynamic_normal_poll_seconds=base.dynamic_normal_poll_seconds,
         dynamic_boundary_poll_seconds=base.dynamic_boundary_poll_seconds,
         dynamic_late_reschedule_minutes=base.dynamic_late_reschedule_minutes,
+        dynamic_access_check_before_minutes=base.dynamic_access_check_before_minutes,
+        dynamic_reservation_first_check_before_minutes=base.dynamic_reservation_first_check_before_minutes,
+        dynamic_reservation_final_check_before_minutes=base.dynamic_reservation_final_check_before_minutes,
         dynamic_max_periods=base.dynamic_max_periods,
         dynamic_reconnect_base_seconds=base.dynamic_reconnect_base_seconds,
         dynamic_reconnect_max_seconds=base.dynamic_reconnect_max_seconds,

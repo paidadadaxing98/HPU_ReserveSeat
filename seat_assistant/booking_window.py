@@ -1,6 +1,18 @@
 from datetime import datetime, timedelta
 
 
+def is_tuesday_morning_closed(day: str, start: str) -> bool:
+    """Return whether the requested start falls in the Tuesday closure."""
+    requested = datetime.strptime(day, "%Y-%m-%d").date()
+    normalized = str(start or "").strip().replace("：", ":").lower()
+    if requested.weekday() != 1:
+        return False
+    if normalized in {"now", "current", "当前", "现在"}:
+        return False
+    hour, minute = (int(value) for value in normalized.split(":", 1))
+    return hour * 60 + minute < 14 * 60
+
+
 def validate_next_day_booking(day: str, now: datetime) -> str:
     expected = (now.date() + timedelta(days=1)).isoformat()
     if day != expected:

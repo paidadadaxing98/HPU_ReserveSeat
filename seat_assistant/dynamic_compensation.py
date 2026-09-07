@@ -8,6 +8,9 @@ from enum import Enum
 
 CHECKIN_BEFORE_MINUTES = 30
 CHECKIN_AFTER_MINUTES = 15
+# The final cancellation starts this many minutes before the window end so a
+# slow browser round still finishes before the hard cutoff.
+FINALIZE_LEAD_MINUTES = 3
 
 
 class DecisionKind(str, Enum):
@@ -119,6 +122,44 @@ def compensation_window(
     )
 
 
+def reservation_checkpoints(
+    reservation_start: datetime,
+    round_index: int = 0,
+    access_before_minutes: int = 6,
+    reservation_first_before_minutes: int = 4,
+    reservation_final_before_minutes: int = 2,
+) -> dict[str, datetime]:
+    """Return the three remote checks for one reservation round.
+
+    Every round — the initial reservation and each compensation rebooking —
+    is checked at start +9/+11/+13 minutes, just before its check-in window
+    closes.  Checking a rebooked slot *before* it starts would declare a
+    perfectly valid booking late and cancel it, so the offsets never move
+    ahead of the slot.
+    """
+    base = reservation_start + timedelta(minutes=15)
+    offsets = (
+        -access_before_minutes,
+        -reservation_first_before_minutes,
+        -reservation_final_before_minutes,
+    )
+    return {
+        "access": base + timedelta(minutes=offsets[0]),
+        "reservation_first": base + timedelta(minutes=offsets[1]),
+        "reservation_final": base + timedelta(minutes=offsets[2]),
+    }
+
+
+def last_action_deadline(window_end: datetime, safety_minutes: int = 1) -> datetime:
+    """Return the latest time at which a dynamic action may start."""
+    return window_end - timedelta(minutes=safety_minutes)
+
+
+def finalize_start(window_end: datetime, lead_minutes: int = FINALIZE_LEAD_MINUTES) -> datetime:
+    """Return the earliest time at which the final cutoff cancel may run."""
+    return window_end - timedelta(minutes=max(1, lead_minutes))
+
+
 def late_action_points(
     anchor_start: datetime,
     boundary_lead_minutes: int = 2,
@@ -137,6 +178,55 @@ def late_action_points(
         points.append(current)
         current += timedelta(minutes=interval_minutes)
     return points
+
+
+def next_half_hour_start(now: datetime, not_before: datetime | None = None) -> str:
+    """Return the next usable half-hour booking start for ``now``.
+
+    An exact half-hour is still usable; any time after it advances to the
+    following node.  The returned value is always explicit so later remote
+    reservation matching does not depend on the site's ``current`` shortcut.
+    """
+    minute = now.minute
+    exact_node = minute in {0, 30} and now.second == 0 and now.microsecond == 0
+    if exact_node:
+        rounded = now.replace(second=0, microsecond=0)
+    else:
+        rounded = now.replace(
+            minute=30 if minute < 30 else 0,
+            second=0,
+            microsecond=0,
+        )
+        if minute >= 30:
+            rounded += timedelta(hours=1)
+    if not_before is not None:
+        boundary = not_before.replace(second=0, microsecond=0)
+        if rounded < boundary:
+            rounded = boundary + timedelta(minutes=30)
+    return rounded.strftime("%H:%M")
+
+
+def next_late_action_index(
+    now: datetime,
+    anchor_start: datetime,
+    action_index: int = 0,
+    boundary_lead_minutes: int = 2,
+    interval_minutes: int = 30,
+    before_minutes: int = 30,
+    after_minutes: int = 90,
+) -> int:
+    """Advance past the action just completed and every missed boundary."""
+    points = late_action_points(
+        anchor_start,
+        boundary_lead_minutes,
+        interval_minutes,
+        before_minutes,
+        after_minutes,
+    )
+    next_index = max(0, int(action_index) + 1)
+    while next_index < len(points) and points[next_index] <= now:
+        next_index += 1
+    return min(next_index, len(points))
 
 
 def evaluate(

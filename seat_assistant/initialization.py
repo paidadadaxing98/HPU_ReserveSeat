@@ -417,9 +417,9 @@ async def run_interactive_initialization(
         output_fn(f"账号 {account_id} 初始化失败：{message}")
         return repository.initialization_state()
     rooms_by_library = verification.get("rooms_by_library") or {}
+    resolved_rules = []
     if seat_rule_values:
         raw_rules = sort_seat_rules([parse_seat_rule(value) for value in seat_rule_values])
-        resolved_rules = []
         for raw_rule in raw_rules:
             resolved = resolve_seat_rule(raw_rule, library_catalog, rooms_by_library)
             resolved_rules.append({
@@ -433,6 +433,15 @@ async def run_interactive_initialization(
         library, floor, room, preference = (
             primary["library"], primary["floor"], primary["room"], primary["seat_preference"]
         )
+        if (
+            all(raw_rule["seat"] != "x" for raw_rule in raw_rules)
+            and len({raw_rule["library"] for raw_rule in raw_rules}) == 1
+            and len({raw_rule["room"] for raw_rule in raw_rules}) == 1
+        ):
+            preference = {
+                "mode": "seats",
+                "seats": [raw_rule["seat"] for raw_rule in raw_rules],
+            }
     else:
         output_fn("请选择座位偏好：")
         output_fn("  1. 随机空闲座位：只选择图书馆，其余自动随机")
@@ -502,11 +511,6 @@ async def run_interactive_initialization(
             floor = ""
     output_fn("请输入别名（可多个，逗号分隔；直接回车保持当前别名）：")
     wecom_aliases = wecom_aliases_from_input(_read_input(input_fn, "别名："), current_aliases)
-    # A normal interactive reinitialization replaces the old precise rules
-    # with the newly selected location/seat preference. Leaving this as None
-    # would make the persistence layer retain stale rules from a prior run.
-    resolved_rules = []
-
     if prompt_periods:
         for name in PERIOD_NAMES:
             current = periods[name]

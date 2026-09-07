@@ -216,6 +216,15 @@ $botDailyAction = New-ScheduledTaskAction `
 $botDailyTrigger = New-ScheduledTaskTrigger `
   -Daily `
   -At ([datetime]::ParseExact($botDailyAt, "HH:mm", [Globalization.CultureInfo]::InvariantCulture))
+# The bot must survive an unexpected exit (for example a mid-day sleep or a
+# killed websocket): re-arm it every 30 minutes for the rest of the day.
+# MultipleInstances=IgnoreNew keeps a healthy instance from being duplicated.
+$botRepetition = New-ScheduledTaskTrigger `
+  -Once `
+  -At ([datetime]::ParseExact($botDailyAt, "HH:mm", [Globalization.CultureInfo]::InvariantCulture)) `
+  -RepetitionInterval (New-TimeSpan -Minutes 30) `
+  -RepetitionDuration (New-TimeSpan -Hours 23)
+$botDailyTrigger.Repetition = $botRepetition.Repetition
 Register-ScheduledTask `
   -TaskName "SeatAssistant-Bot-Daily" `
   -Action $botDailyAction `

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import inspect
 import json
 import logging
+import os
 from pathlib import Path
 import queue
 import threading
@@ -13,6 +14,8 @@ import time
 import uuid
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+
+from .runtime_logging import compact_message
 
 from .commands import BOT_COMMAND_HELP, REMOTE_COMMAND_HELP, REMOTE_COMMAND_KINDS, parse_command
 from .notifications import render_tweet_card, render_tweet_push
@@ -48,13 +51,15 @@ _PERIOD_LABELS = {
 
 _STATUS_LABELS = {
     "reserved": "已预约",
-    "uncertain": "结果待核验",
+    "uncertain": "预约失败",
     "failed": "预约失败",
     "cancelled": "已取消",
     "monitoring": "监控中",
     "entered": "履约中",
     "away_cancelled": "暂离超时已取消",
 }
+
+_LEGACY_LOCK_MAX_AGE_SECONDS = 15 * 60 * 60 + 31 * 60
 
 
 def render_local_status(day: str, reservations, dynamic_sessions=()) -> str:
@@ -130,17 +135,57 @@ class SingleInstanceLock:
 
             self.path.parent.mkdir(parents=True, exist_ok=True)
 
+            self._reclaim_stale_lock()
+
             self._handle = self.path.open("x", encoding="utf-8")
 
         except FileExistsError:
 
             return False
 
-        self._handle.write("locked")
+        self._handle.write(str(os.getpid()))
 
         self._handle.flush()
 
         return True
+
+
+    def _reclaim_stale_lock(self) -> None:
+
+        if not self.path.exists():
+
+            return
+
+        try:
+
+            pid = int(self.path.read_text(encoding="ascii").strip())
+
+        except (OSError, ValueError):
+
+            # Releases before this version wrote the literal marker "locked".
+            # That marker cannot identify a live process, so only reclaim it
+            # after the maximum scheduled bot runtime plus a small buffer.
+            try:
+                age_seconds = time.time() - self.path.stat().st_mtime
+            except FileNotFoundError:
+                return
+            if age_seconds <= _LEGACY_LOCK_MAX_AGE_SECONDS:
+                return
+            try:
+                self.path.unlink()
+            except FileNotFoundError:
+                pass
+            return
+
+        if pid > 0 and not _pid_is_running(pid):
+
+            try:
+
+                self.path.unlink()
+
+            except FileNotFoundError:
+
+                pass
 
 
     def release(self) -> None:
@@ -172,6 +217,37 @@ class SingleInstanceLock:
     def __exit__(self, exc_type, exc, tb):
 
         self.release()
+
+
+def _pid_is_running(pid: int) -> bool:
+
+    if os.name == "nt":
+
+        import ctypes
+
+        process = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+
+        if not process:
+
+            return False
+
+        ctypes.windll.kernel32.CloseHandle(process)
+
+        return True
+
+    try:
+
+        os.kill(pid, 0)
+
+    except ProcessLookupError:
+
+        return False
+
+    except PermissionError:
+
+        return True
+
+    return True
 
 
 class WeComBotRunner:
@@ -244,8 +320,12 @@ class WeComBotRunner:
                     if self.deduplicator.seen(message.message_id):
                         continue
                     self._invoke_handler(message, transport)
-            except Exception:
-                logging.getLogger(__name__).warning("企业微信机器人连接断开，准备重连", exc_info=True)
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "企业微信机器人连接断开，准备重连：%s：%s",
+                    type(exc).__name__,
+                    compact_message(exc),
+                )
                 if self._stopped:
                     break
             finally:
@@ -336,6 +416,7 @@ class WeComCommandRouter:
         command_submitter=None,
         status_reader=None,
         default_setter=None,
+        account_toggler=None,
     ):
 
         self.resolver = resolver
@@ -344,15 +425,27 @@ class WeComCommandRouter:
         self.command_submitter = command_submitter
         self.status_reader = status_reader
         self.default_setter = default_setter
+        self.account_toggler = account_toggler
 
 
     def handle(self, message: WeComBotMessage, transport=None) -> bool:
 
         send_to_user = getattr(transport, "send_to_user", self.send_to_user)
         reply = getattr(transport, "reply", self.reply)
+        # Multi-line content (help, status) is sent as plain text because
+        # markdown rendering collapses single newlines.
+        reply_plain = getattr(transport, "reply_markdown", None) or reply
         command = parse_command(message.text)
+        logging.getLogger(__name__).info(
+            "机器人指令：%s sender=%s kind=%s period=%s at=%s",
+            compact_message(message.text, limit=80),
+            message.sender,
+            command.kind,
+            command.period,
+            command.at,
+        )
         if command.kind == "help":
-            reply(message, BOT_COMMAND_HELP)
+            reply_plain(message, BOT_COMMAND_HELP)
             return True
         if command.kind == "set_default":
             recipient = self.resolver.resolve_sender(message.sender)
@@ -362,15 +455,20 @@ class WeComCommandRouter:
             if self.default_setter is None:
                 reply(message, "默认到馆时间修改功能尚未配置。")
                 return False
+            interval = f"{command.at}-{command.end}" if command.end else command.at
             try:
                 updated = self.default_setter(
                     recipient.account_id,
                     command.period,
-                    command.at,
+                    interval,
                 )
             except Exception as exc:
-                logging.getLogger(__name__).warning("默认到馆时间写入失败", exc_info=True)
-                reply(message, f"默认到馆时间修改失败：{type(exc).__name__}。")
+                logging.getLogger(__name__).warning(
+                    "默认到馆时间写入失败：%s：%s",
+                    type(exc).__name__,
+                    compact_message(exc),
+                )
+                reply(message, f"默认到馆时间修改失败：{exc}。")
                 return False
             if not updated:
                 reply(message, "默认到馆时间写入失败，请检查账号数据库。")
@@ -379,7 +477,38 @@ class WeComCommandRouter:
                 command.period,
                 command.period,
             )
-            reply(message, f"已将{period_label}默认到馆时间改为 {command.at}，已写入本地数据库。")
+            reply(message, f"已将{period_label}默认到馆时间改为 {interval}，已写入本地数据库。")
+            return True
+        if command.kind in {"enable_account", "disable_account"}:
+            owner = self.resolver.resolve_sender(message.sender)
+            if owner is None:
+                reply(message, "没有权限启用/关闭账号。")
+                return False
+            if self.account_toggler is None:
+                reply(message, "启用/关闭账号功能尚未配置。")
+                return False
+            recipient = (
+                self.resolver.resolve(command.target) if command.target else owner
+            )
+            if recipient is None:
+                reply(message, f"未找到账号：{command.target}")
+                return False
+            enabling = command.kind == "enable_account"
+            try:
+                self.account_toggler(recipient.account_id, enabling)
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "账号启用状态写入失败：%s：%s",
+                    type(exc).__name__,
+                    compact_message(exc),
+                )
+                reply(message, f"账号启用状态修改失败：{exc}。")
+                return False
+            action = "启用" if enabling else "关闭"
+            reply(message, (
+                f"已{action}账号 {recipient.account_id}。对下次启动的预约/监控任务生效；"
+                f"如需恢复请发送 启用账号。"
+            ))
             return True
         if command.kind in REMOTE_COMMAND_KINDS:
             recipient = self.resolver.resolve_sender(message.sender)
@@ -395,7 +524,7 @@ class WeComCommandRouter:
                 except Exception as exc:
                     reply(message, f"状态查询失败：{type(exc).__name__}。")
                     return False
-                reply(message, str(status))
+                reply_plain(message, str(status))
                 return True
             if self.command_submitter is None:
                 reply(message, "座位控制命令尚未配置执行队列。")
@@ -484,6 +613,8 @@ def sdk_frame_to_message(frame: dict) -> WeComBotMessage | None:
 class OfficialSdkTransport:
     """Adapt the official async SDK client to the existing sync transport contract."""
 
+    OUTBOX_RETRY_SECONDS = 30
+
     def __init__(
         self,
         client=None,
@@ -500,6 +631,7 @@ class OfficialSdkTransport:
         self._thread = None
         self._messages = queue.Queue()
         self._closed = threading.Event()
+        self._last_outbox_attempt = 0.0
 
     def connect(self, bot_id: str, secret: str) -> None:
         if self._client is None:
@@ -543,7 +675,11 @@ class OfficialSdkTransport:
 
     def iter_messages(self):
         while not self._closed.is_set():
-            self.deliver_outbox_once()
+            # Retry a drained-outbox at a modest cadence: when the websocket
+            # is down every attempt fails and floods the log.
+            if time.monotonic() - self._last_outbox_attempt >= self.OUTBOX_RETRY_SECONDS:
+                self._last_outbox_attempt = time.monotonic()
+                self.deliver_outbox_once()
             try:
                 yield self._messages.get(timeout=0.5)
             except queue.Empty:
@@ -552,23 +688,34 @@ class OfficialSdkTransport:
     def interrupt(self) -> None:
         self._closed.set()
 
-    def send_to_user(self, user_id: str, text: str) -> bool:
+    def _send_message_body(self, user_id: str, body: dict) -> bool:
         try:
-            result = self._run_sync(self._client.send_message(
-                user_id,
-                {"msgtype": "markdown", "markdown": {"content": text}},
-            ))
+            result = self._run_sync(self._client.send_message(user_id, body))
             return not isinstance(result, dict) or result.get("errcode", 0) == 0
-        except Exception:
-            logging.getLogger(__name__).warning("企业微信官方 SDK 主动发送失败", exc_info=True)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "企业微信官方 SDK 主动发送失败：%s：%s",
+                type(exc).__name__,
+                compact_message(exc),
+            )
             return False
+
+    def send_to_user(self, user_id: str, text: str) -> bool:
+        return self._send_message_body(
+            user_id,
+            {"msgtype": "markdown", "markdown": {"content": text}},
+        )
 
     def send_template_card(self, user_id: str, card: dict) -> bool:
         try:
             result = self._run_sync(self._client.send_message(user_id, card))
             return not isinstance(result, dict) or result.get("errcode", 0) == 0
-        except Exception:
-            logging.getLogger(__name__).warning("企业微信官方 SDK 卡片发送失败", exc_info=True)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "企业微信官方 SDK 卡片发送失败：%s：%s",
+                type(exc).__name__,
+                compact_message(exc),
+            )
             return False
 
     def deliver_outbox_once(self) -> bool:
@@ -586,9 +733,24 @@ class OfficialSdkTransport:
                 if self.send_template_card(user_id, payload):
                     path.unlink(missing_ok=True)
                     delivered = True
-            except Exception:
-                logging.getLogger(__name__).warning("企业微信机器人投递箱处理失败：%s", path, exc_info=True)
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "企业微信机器人投递箱处理失败：%s：%s：%s",
+                    path.name,
+                    type(exc).__name__,
+                    compact_message(exc),
+                )
         return delivered
+
+    def reply_markdown(self, message: WeComBotMessage, text: str) -> bool:
+        """Reply through the stream channel, which renders immediately.
+
+        The response command accepts a markdown body (errcode 0) but does not
+        display it; plain "text" bodies are rejected with errcode 40008.  The
+        stream renderer collapses single newlines, so every line break is
+        promoted to a paragraph break to keep the list readable.
+        """
+        return self.reply(message, text.replace("\n", "\n\n"))
 
     def reply(self, message: WeComBotMessage, text: str) -> bool:
         if message.raw_frame is None:
@@ -616,8 +778,12 @@ class OfficialSdkTransport:
                     },
                 ))
             return not isinstance(result, dict) or result.get("errcode", 0) == 0
-        except Exception:
-            logging.getLogger(__name__).warning("企业微信官方 SDK 回复失败", exc_info=True)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "企业微信官方 SDK 回复失败：%s：%s",
+                type(exc).__name__,
+                compact_message(exc),
+            )
             return False
 
     def reply_template_card(self, message: WeComBotMessage, card: dict) -> bool:
@@ -632,8 +798,12 @@ class OfficialSdkTransport:
             else:
                 result = self._run_sync(self._client.reply(message.raw_frame, card))
             return not isinstance(result, dict) or result.get("errcode", 0) == 0
-        except Exception:
-            logging.getLogger(__name__).warning("企业微信官方 SDK 卡片回复失败", exc_info=True)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "企业微信官方 SDK 卡片回复失败：%s：%s",
+                type(exc).__name__,
+                compact_message(exc),
+            )
             return False
 
     def close(self) -> None:
@@ -641,8 +811,12 @@ class OfficialSdkTransport:
         if self._client is not None and self._loop is not None:
             try:
                 self._run_sync(self._client.disconnect())
-            except Exception:
-                logging.getLogger(__name__).warning("关闭企业微信官方 SDK 连接失败", exc_info=True)
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "关闭企业微信官方 SDK 连接失败：%s：%s",
+                    type(exc).__name__,
+                    compact_message(exc),
+                )
         if self._loop is not None and self._thread is not None and self._thread.is_alive():
             self._loop.call_soon_threadsafe(self._loop.stop)
             self._thread.join(timeout=5)

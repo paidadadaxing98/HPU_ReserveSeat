@@ -16,24 +16,38 @@ sys.path.insert(0, str(ROOT))
 
 from seat_assistant.calibration import sanitize_url
 from seat_assistant.account_lock import AccountLock
-from seat_assistant.browser_session import LockedBrowser
+from seat_assistant.access_records import AuthenticationError, is_authentication_error
+from seat_assistant.browser_session import LockedBrowser, prepare_context_page
 from seat_assistant.auth_flow import auth_header_names, browser_api_headers, captcha_image_selectors, captcha_input_selectors, captcha_kind_from_text, credentials_available, is_captcha_failure_message, is_seat_app_url, library_selected, login_failure_message, normalize_library
 from seat_assistant.captcha_llm import CaptchaVisionError, QwenCaptchaClient
 from seat_assistant.config import _load_dotenv, load_account_settings
 from seat_assistant.date_selection import date_option_matches, normalize_date
 from seat_assistant.end_times import parse_native_end_times
-from seat_assistant.booking_window import validate_booking_date
+from seat_assistant.booking_window import is_tuesday_morning_closed, validate_booking_date
 from seat_assistant.initialization import initialization_skip_message
 from seat_assistant.notifications import WeComNotifier, send_reservation_notification
 from seat_assistant.preview import choose_room_for_preference, layout_from_response, layout_request_matches, normalize_room_name, preview_seat_candidates, room_preference_candidates, selection_seed
 from seat_assistant.reservation import SeatResult
+from seat_assistant.runtime_logging import compact_message, summarize_candidate_errors
 from seat_assistant.seat_inventory import seats_from_layout
 from seat_assistant.storage import Repository
-from seat_assistant.submission import active_reservations_for_day, blocking_active_reservations_for_day, blocking_cancelable_reservations_for_day, confirmation_required, day_reservations, end_time_response_matches_start, find_matching_reservation, find_reservation_by_day_and_end, find_reservation_by_day_and_time, find_similar_reservation, history_page_records, local_reservation_blocks_retry, normalize_time_option, requested_times_available, reservation_matches, submission_settled, time_option_id, time_values, validate_half_hour_time
+from seat_assistant.submission import active_reservations_for_day, blocking_active_reservations_for_day, blocking_cancelable_reservations_for_day, confirmation_required, day_reservations, end_time_response_matches_start, find_cancelable_reservation, find_matching_reservation, find_reservation_by_day_and_end, find_reservation_by_day_and_time, find_reservation_record, find_similar_reservation, history_page_records, local_reservation_blocks_retry, normalize_time_option, requested_times_available, reservation_matches, reservation_state, submission_settled, time_option_id, time_values, validate_half_hour_time
 
 SITE_URL = os.getenv("SEAT_LOGIN_URL", "https://seatlib.hpu.edu.cn/libseat/")
 CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 PROFILE = Path(".browser-profile").resolve()
+MAX_TIME_DIALOG_RECOVERIES = 3
+
+
+class BookingTimeUnavailable(RuntimeError):
+    """The site explicitly did not expose the requested booking time."""
+
+
+def _runtime_print(message: str, *, verbose: bool = False) -> None:
+    """Print useful unattended diagnostics while hiding routine UI chatter."""
+    if verbose and os.getenv("SEAT_VERBOSE_LOGGING", "false").lower() not in {"1", "true", "yes", "on"}:
+        return
+    print(compact_message(message, limit=600), flush=True)
 
 
 def ensure_initialized_account(settings, repository) -> None:
@@ -80,8 +94,10 @@ async def main(args):
     validate_booking_date(args.date, __import__('datetime').datetime.now())
     args.start = validate_half_hour_time(args.start)
     args.end = validate_half_hour_time(args.end)
+    if is_tuesday_morning_closed(args.date, args.start):
+        raise BookingTimeUnavailable(f"周二上午闭馆：{args.date} 上午不开放座位预约")
     async with LockedBrowser(profile, headless=getattr(args, "headless", False)) as context:
-        page = context.pages[0] if context.pages else await context.new_page()
+        page = await prepare_context_page(context)
         api_auth = {"headers": {}, "token": ""}
         capture_tasks = set()
 
@@ -103,21 +119,21 @@ async def main(args):
             logged_in = await login_if_configured(page, account_settings)
             if not logged_in:
                 if "#/login" in page.url:
-                    print("当前是座位系统登录状态失效，正在重新打开统一认证入口……")
+                    _runtime_print("当前是座位系统登录状态失效，正在重新打开统一认证入口……")
                     await page.goto(account_settings.login_url, wait_until="domcontentloaded")
                     logged_in = await login_if_configured(page, account_settings)
                 if not logged_in:
                     if not interactive:
                         raise RuntimeError("未能自动登录，已停止无人值守预约")
-                    print("第 1 步（手动）：请完成登录，直到进入‘自选座位’首页。")
+                    _runtime_print("第 1 步（手动）：请完成登录，直到进入‘自选座位’首页。")
                     pause_for_manual_interaction("登录完成后按回车：", interactive=interactive)
-            print("正在确认进入座位预约首页……")
+            _runtime_print(f"账号 {account_settings.account_id} 已完成登录，开始预约流程。")
             await page.wait_for_url("**/libseat/**", timeout=30000)
             if use_seat_rules:
                 libraries = await visible_library_names(page)
                 rooms_by_library, catalog_errors = await collect_rooms_by_library(page, libraries)
                 for library, error in catalog_errors.items():
-                    print(f"读取图书馆‘{library}’的阅览室失败：{error}")
+                    _runtime_print(f"读取图书馆‘{library}’的阅览室失败：{error}")
                 room_candidates = room_preference_candidates(
                     seat_rules,
                     libraries,
@@ -133,15 +149,15 @@ async def main(args):
                 args.location = {"library": room_candidates[0]["library"], "floor": "", "room": room_candidates[0]["room"]}
                 args.preference = dict(room_candidates[0]["preference"])
                 args.room = room_candidates[0]["room"]
-                print(f"按座位规则准备候选：{len(room_candidates)} 个图书馆/阅览室组合。")
+                _runtime_print(f"座位规则已生成 {len(room_candidates)} 个候选阅览室。", verbose=True)
                 await select_library(page, room_candidates[0]["library"])
                 current_library = room_candidates[0]["library"]
             else:
-                print(f"程序操作：自动选择图书馆‘{args.location['library']}’。")
+                _runtime_print(f"选择图书馆‘{args.location['library']}’。", verbose=True)
                 await select_library(page, args.location["library"])
                 room_candidates = None
                 current_library = args.location["library"]
-            print(f"程序操作：自动选择预约日期‘{args.date}’。")
+            _runtime_print(f"选择预约日期‘{args.date}’。", verbose=True)
             await select_date(page, args.date)
             if room_candidates is None and not getattr(args, "room", ""):
                 room_names = await visible_room_names(page)
@@ -166,7 +182,7 @@ async def main(args):
                     ),
                     round_robin=round_robin,
                 )
-                print(f"根据座位偏好选择阅览室：{args.room}")
+                _runtime_print(f"根据座位偏好选择阅览室：{args.room}。", verbose=True)
             if room_candidates is None:
                 room_candidates = [{
                     "library": args.location["library"],
@@ -174,32 +190,33 @@ async def main(args):
                     "preference": dict(args.preference),
                 }]
             existing = await fetch_user_reservations(page, api_auth)
-            print(f"当天预约记录：{daily_reservation_details(existing, args.date) or '无'}")
+            _runtime_print(
+                f"账号 {account_settings.account_id} 当天已有 {len(day_reservations(existing, args.date))} 条预约记录。"
+            )
             reservation_key = _reservation_storage_key(args)
             local_record = repository.get_reservation(args.date, reservation_key)
             if local_reservation_blocks_retry(local_record):
-                print(f"本地记录显示本次日期已有{local_record['status']}提交，停止以避免重复预约：{local_record['start']}-{local_record['end']}")
+                _runtime_print(f"本地记录已有{local_record['status']}提交，停止重复预约：{local_record['start']}-{local_record['end']}。")
                 await context.close()
                 return
             active_today = blocking_active_reservations_for_day(existing, args.date, datetime.now())
             if active_today:
                 details = "；".join(reservation_summary(item) for item in active_today)
-                print(f"当天已经存在有效预约，学校限制一次只能预约一个时间段，跳过本次预约：{details}")
+                _runtime_print(f"当天已有有效预约，按学校规则跳过本次预约：{details}")
                 await context.close()
                 return
             quota_day = date.today().isoformat()
             if repository.successful_booking_count(quota_day) >= account_settings.daily_success_limit:
-                print(f"账号 {account_settings.account_id} 今日已完成 {account_settings.daily_success_limit} 次成功预约，停止本次提交。")
+                _runtime_print(f"账号 {account_settings.account_id} 今日成功预约次数已达上限，停止本次提交。")
                 await context.close()
                 return
             similar = find_similar_reservation(existing, args.date, args.room, args.start, args.end)
             if similar:
-                print(f"首页已检测到相近预约，跳过选座和提交：{reservation_summary(similar)}")
+                _runtime_print(f"已检测到相近预约，跳过选座和提交：{reservation_summary(similar)}")
                 await context.close()
                 return
         except Exception as exc:
-            print(f"流程暂停：{exc}")
-            print(f"浏览器当前页面：{sanitize_url(page.url)}")
+            _runtime_print(f"预约流程错误：{compact_message(exc)}")
             pause_for_manual_interaction("请检查浏览器页面；确认后按回车关闭浏览器：", interactive=interactive)
             return
         selected = None
@@ -214,7 +231,15 @@ async def main(args):
                     await select_library(page, room_candidate["library"])
                     await select_date(page, args.date)
                     current_library = room_candidate["library"]
-                print(f"程序操作：自动点击阅览室‘{args.room}’，请不要在网页上点击阅览室。")
+
+                async def restore_after_time_dialog_failure():
+                    await page.reload(wait_until="domcontentloaded")
+                    await wait_for_authenticated_page(page, timeout_ms=30000)
+                    await select_library(page, args.location["library"])
+                    await select_date(page, args.date)
+                    await wait_for_room_visible(page, args.room)
+
+                _runtime_print(f"尝试阅览室‘{args.room}’。", verbose=True)
                 room_selected, room_headers, room_errors = await select_room_and_seat(
                     page,
                     api_auth,
@@ -233,7 +258,10 @@ async def main(args):
                         args.room,
                     ),
                     args.room_id,
+                    restore_page=restore_after_time_dialog_failure,
                 )
+            except BookingTimeUnavailable:
+                raise
             except Exception as exc:
                 if page.is_closed():
                     raise RuntimeError(f"浏览器页面已关闭，阅览室错误：{exc}") from exc
@@ -242,52 +270,54 @@ async def main(args):
             if room_selected is not None:
                 selected = room_selected
                 request_headers = room_headers
-                print(f"接口选择座位：{selected.number}（座位ID {selected.seat_id}，状态 FREE）")
+                _runtime_print(f"选定座位 {selected.number}。")
                 break
         if selected is None:
             diagnostics = await auth_diagnostics(page, request_headers)
-            details = "；".join(candidate_errors) or "没有可尝试的空闲座位"
+            details = summarize_candidate_errors(candidate_errors, limit=700) or "没有可尝试的空闲座位"
             raise RuntimeError(
                 f"没有找到同时满足 {args.start}-{args.end} 的空闲座位：{details}。"
-                f"认证诊断（仅字段名，不含值）：{diagnostics}"
+                f"认证诊断（仅字段名，不含值）：{compact_message(diagnostics, limit=400)}"
             )
         # Recheck immediately before submit in case another process created a
         # similar reservation after the homepage check.
         existing = await fetch_user_reservations(page, api_auth)
-        print(f"提交前当天预约记录：{daily_reservation_details(existing, args.date) or '无'}")
+        _runtime_print(
+            f"账号 {account_settings.account_id} 提交前已有 {len(day_reservations(existing, args.date))} 条预约记录。"
+        )
         reservation_key = _reservation_storage_key(args)
         local_record = repository.get_reservation(args.date, reservation_key)
         if local_reservation_blocks_retry(local_record):
-            print(f"提交前发现本地已有{local_record['status']}提交，取消本次操作以避免重复预约：{local_record['start']}-{local_record['end']}")
+            _runtime_print(f"提交前发现本地已有{local_record['status']}提交，取消本次操作：{local_record['start']}-{local_record['end']}。")
             await close_time_dialog(page)
             await context.close()
             return
         active_today = blocking_active_reservations_for_day(existing, args.date, datetime.now())
         if active_today:
             details = "；".join(reservation_summary(item) for item in active_today)
-            print(f"提交前发现当天已有有效预约，学校限制一次只能预约一个时间段，取消本次提交：{details}")
+            _runtime_print(f"提交前发现当天已有有效预约，取消本次提交：{details}")
             await close_time_dialog(page)
             await context.close()
             return
         similar = find_similar_reservation(existing, args.date, args.room, args.start, args.end)
         if similar:
-            print(f"提交前再次检测到相近预约，取消本次操作：{reservation_summary(similar)}")
+            _runtime_print(f"提交前再次检测到相近预约，取消本次操作：{reservation_summary(similar)}")
             await close_time_dialog(page)
             await context.close()
             return
         phrase = input("当前页面已选好座位和时间。输入 SUBMIT 才会提交，直接回车保持预览：") if args.confirm_submit and interactive else ""
         if confirmation_required(args.submit, args.confirm_submit, phrase):
-            print("预览已完成：页面停在‘立即预约’前。没有提交预约。")
-            print(f"页面：{sanitize_url(page.url)}")
+            _runtime_print("预览完成，未提交预约。")
+            _runtime_print(f"当前页面：{sanitize_url(page.url)}。", verbose=True)
             pause_for_manual_interaction("确认页面选择正确后按回车关闭预览：", interactive=interactive)
             await context.close()
             return
-        print("正在提交一次真实预约……")
+        _runtime_print(f"账号 {account_settings.account_id} 开始提交 {args.start}-{args.end} 预约。")
         await page.get_by_role("button", name="立即预约").click()
         try:
             await page.wait_for_function("() => !document.body.innerText.includes('正在玩命预约中') && !document.body.innerText.includes('玩命预约')", timeout=30000)
         except Exception:
-            print("提交请求超过 30 秒仍未结束，结果不明确；不会重复提交。")
+            _runtime_print("提交请求超过 30 秒仍未结束，未能确认提交结果；不会重复提交，稍后由核验重查。")
             repository.save_reservation(
                 args.date, reservation_key, "pending", args.start, args.end, args.room, selected.number,
                 "提交请求超过 30 秒仍未结束",
@@ -302,17 +332,16 @@ async def main(args):
             return
         await page.wait_for_timeout(1000)
         page_text = await page.locator("body").inner_text()
-        print("提交后的页面提示：", " ".join(page_text.split())[-500:])
         submission_signal = submission_notice(page_text)
         if submission_signal[1]:
-            print(f"提交页面信号：{submission_signal[1]}")
+            _runtime_print(f"提交页面结果：{submission_signal[1]}。")
         if await close_success_dialog(page):
-            print("已自动关闭预约成功弹窗，并确认阻塞层已隐藏。")
-        print("正在打开‘我的预约’核验……")
+            _runtime_print("预约成功弹窗已关闭。", verbose=True)
+        _runtime_print("开始读取‘我的预约’核验结果。")
         try:
             await page.get_by_text("我的预约", exact=True).last.click()
         except Exception as exc:
-            print(f"打开‘我的预约’页面失败，将只通过接口核验：{exc}")
+            _runtime_print(f"打开‘我的预约’页面失败，改用接口核验：{exc}")
         try:
             await page.wait_for_function("() => document.body.innerText.includes('我的预约') && !document.body.innerText.includes('正在加载')", timeout=15000)
         except Exception:
@@ -320,26 +349,27 @@ async def main(args):
         verification_status, matched_reservation, verification_message = await wait_for_reservation_confirmation(
             page, api_auth, args.date, args.room, selected.number, args.start, args.end,
             existing, submission_signal=submission_signal,
+            reauthenticate=lambda: reauthenticate_reservation_session(page, api_auth, account_settings),
         )
         if verification_status == "success":
             if record_success_quota:
                 repository.record_successful_booking(date.today().isoformat(), f"{args.date}:{selected.number}:{uuid.uuid4().hex}")
             repository.save_reservation(args.date, reservation_key, "reserved", args.start, args.end, args.room, selected.number, verification_message)
-            print(f"核验成功：{args.date}，{args.room}，座位 {selected.number}，{args.start}-{args.end}")
+            _runtime_print(f"预约核验成功：{args.date}，座位 {selected.number}，{args.start}-{args.end}。")
             send_preview_notification(
                 notifier,
                 args,
                 SeatResult(True, args.room, selected.number, verification_message),
             )
         elif verification_status == "failed":
-            print(f"预约明确失败：{verification_message}")
+            _runtime_print(f"预约明确失败：{verification_message}")
             send_preview_notification(
                 notifier,
                 args,
                 SeatResult(False, args.room, selected.number, verification_message),
             )
         elif verification_status == "pending":
-            print(f"预约已提交，待核验：{verification_message}")
+            _runtime_print(f"预约未确认成功：{verification_message}")
             repository.save_reservation(args.date, reservation_key, "pending", args.start, args.end, args.room, selected.number, verification_message)
             send_preview_notification(
                 notifier,
@@ -347,14 +377,14 @@ async def main(args):
                 SeatResult(False, args.room, selected.number, verification_message, conclusive=False),
             )
         else:
-            print(f"核验结果不明确：{verification_message or '请在‘我的预约’页面手动确认'}；程序不会重复提交。")
-            repository.save_reservation(args.date, reservation_key, "uncertain", args.start, args.end, args.room, selected.number, verification_message or "提交后核验结果不明确")
+            _runtime_print(f"预约未确认成功：{verification_message or '未在‘我的预约’中找到该预约'}；程序不会重复提交。")
+            repository.save_reservation(args.date, reservation_key, "uncertain", args.start, args.end, args.room, selected.number, verification_message or "未在‘我的预约’中找到该预约，判定未预约成功")
             send_preview_notification(
                 notifier,
                 args,
-                SeatResult(False, args.room, selected.number, verification_message or "提交后核验结果不明确", conclusive=False),
+                SeatResult(False, args.room, selected.number, verification_message or "未在‘我的预约’中找到该预约，判定未预约成功", conclusive=False),
             )
-        print(f"页面：{sanitize_url(page.url)}")
+        _runtime_print(f"预约流程结束，当前页面：{sanitize_url(page.url)}。", verbose=True)
         if not args.submit or args.confirm_submit:
             pause_for_manual_interaction("确认页面选择正确后按回车关闭预览：", interactive=interactive)
         await context.close()
@@ -371,31 +401,26 @@ async def select_room_and_seat(
     end: str,
     seed: str,
     room_id: int | None = None,
+    restore_page=None,
 ) -> tuple[object | None, dict, list[str]]:
     """Open one room and try its free seats, returning errors for fallback."""
     errors = []
     try:
-        async with page.expect_response(lambda response: layout_request_matches(response.url), timeout=30000) as response_info:
-            await page.get_by_text(room, exact=True).first.click()
-        response = await response_info.value
-        body = await response.json()
-        print(f"座位布局接口：HTTP {response.status}，code={body.get('code')}，message={body.get('message')}")
-        layout = layout_from_response(body)
-        actual_room_id = layout.get("id")
-        print(f"网页返回阅览室：{layout.get('name')}，ID={actual_room_id}")
-        if normalize_room_name(layout.get("name", "")) != normalize_room_name(room):
-            raise ValueError(f"网页返回的阅览室是‘{layout.get('name')}’，不是‘{room}’。请检查图书馆选择。")
-        if room_id is not None and room_id != actual_room_id:
-            print(f"提示：命令中的 room-id={room_id} 与网页实际 ID={actual_room_id} 不一致；本次使用网页实际 ID。")
+        layout = await load_room_layout(page, room, room_id)
     except Exception as exc:
-        if page.is_closed():
-            raise RuntimeError(f"浏览器页面已关闭，阅览室错误：{exc}") from exc
-        return None, {}, [f"阅览室 {room}: {exc}"]
+        return None, {}, [str(exc)]
 
     seats = seats_from_layout(layout)
+    candidates = list(preview_seat_candidates(seats, preferred, preference, seed=seed))
+    tried_seat_ids = set()
+    recovery_count = 0
     request_headers = {}
-    for candidate in preview_seat_candidates(seats, preferred, preference, seed=seed):
-        print(f"尝试座位：{candidate.number}（座位ID {candidate.seat_id}，状态 FREE）")
+    while candidates:
+        candidate = candidates.pop(0)
+        if candidate.seat_id in tried_seat_ids:
+            continue
+        tried_seat_ids.add(candidate.seat_id)
+        _runtime_print(f"尝试座位 {candidate.number}。", verbose=True)
         try:
             async with page.expect_response(lambda r: "/rest/v2/startTimesForSeat/" in r.url, timeout=15000) as start_info:
                 await page.get_by_text(candidate.number, exact=True).last.click()
@@ -436,11 +461,76 @@ async def select_room_and_seat(
             errors.append(f"{room}/{candidate.number}: {exc}")
             if page.is_closed():
                 raise RuntimeError(f"浏览器页面已关闭，原始座位错误：{exc}") from exc
-            await close_time_dialog(page)
+            if recovery_count >= MAX_TIME_DIALOG_RECOVERIES:
+                errors.append(
+                    f"{room}/{candidate.number}: 时间弹层连续恢复 {MAX_TIME_DIALOG_RECOVERIES} 次仍失败，已停止本阅览室"
+                )
+                return None, request_headers, errors
+            recovery_count += 1
+            try:
+                # The last recovery tier clears the SPA's session storage:
+                # some deployments re-open the time overlay from per-tab UI
+                # state that survives a plain reload.
+                recovered = await recover_time_dialog(
+                    page, restore_page,
+                    hard_reset=recovery_count >= MAX_TIME_DIALOG_RECOVERIES,
+                )
+            except Exception as recovery_error:
+                errors.append(f"{room}/{candidate.number}: 时间选择状态恢复失败：{recovery_error}")
+                return None, request_headers, errors
+            if recovered:
+                _runtime_print("时间选择弹层未关闭，已刷新页面后继续尝试。")
+                try:
+                    layout = await load_room_layout(page, room, room_id)
+                except Exception as reload_error:
+                    errors.append(f"阅览室 {room}: 恢复后重新打开失败：{reload_error}")
+                    return None, request_headers, errors
+                seats = seats_from_layout(layout)
+                candidates = list(preview_seat_candidates(seats, preferred, preference, seed=seed))
             continue
         return candidate, candidate_headers, errors
     errors.append(f"阅览室 {room} 没有满足 {start}-{end} 的可用座位")
     return None, request_headers, errors
+
+
+async def dismiss_stale_booking_overlay(page) -> bool:
+    """Dismiss leftover booking overlays before reusing a browser session."""
+    try:
+        closed_success = await close_success_dialog(page, timeout_ms=500)
+        await close_time_dialog(page)
+        return closed_success
+    except RuntimeError as exc:
+        raise RuntimeError("上一轮预约遗留弹窗未能关闭，已停止复用当前浏览器会话") from exc
+
+
+async def load_room_layout(page, room: str, room_id: int | None = None) -> dict:
+    """Open a room and verify the layout response belongs to that room."""
+    try:
+        async with page.expect_response(lambda response: layout_request_matches(response.url), timeout=30000) as response_info:
+            await page.get_by_text(room, exact=True).first.click()
+        response = await response_info.value
+        body = await response.json()
+        _runtime_print(
+            f"座位布局读取完成：HTTP {response.status}，code={body.get('code')}。",
+            verbose=True,
+        )
+        layout = layout_from_response(body)
+        actual_room_id = layout.get("id")
+        _runtime_print(f"网页返回阅览室‘{layout.get('name')}’。", verbose=True)
+        if normalize_room_name(layout.get("name", "")) != normalize_room_name(room):
+            raise ValueError(f"网页返回的阅览室是‘{layout.get('name')}’，不是‘{room}’。请检查图书馆选择。")
+        if room_id is not None and room_id != actual_room_id:
+            _runtime_print(f"阅览室 ID 已按网页返回值校正为 {actual_room_id}。")
+        return layout
+    except Exception as exc:
+        if page.is_closed():
+            raise RuntimeError(f"浏览器页面已关闭，阅览室错误：{exc}") from exc
+        raise RuntimeError(f"阅览室 {room}: {exc}") from exc
+
+
+async def wait_for_room_visible(page, room: str, timeout_ms: int = 30000) -> None:
+    target = page.get_by_text(room, exact=True).first
+    await target.wait_for(state="visible", timeout=timeout_ms)
 
 
 async def run_scheduled_reservation(settings, day: str, period: str, start: str, end: str) -> SeatResult:
@@ -465,6 +555,8 @@ async def run_scheduled_reservation(settings, day: str, period: str, start: str,
     repository = Repository(str(settings.db_path), settings.account_id)
     try:
         await main(args)
+    except BookingTimeUnavailable as exc:
+        return SeatResult(False, message=str(exc), conclusive=True)
     except Exception as exc:
         return SeatResult(False, message=f"定时预约流程异常：{exc}", conclusive=False)
     record = repository.get_reservation(day, getattr(args, "reservation_key", period))
@@ -486,7 +578,7 @@ async def fetch_scheduled_current_reservations(settings, day: str) -> list[dict]
     account_settings = settings
     profile = Path(account_settings.profile_path)
     async with LockedBrowser(profile, headless=True) as context:
-        page = context.pages[0] if context.pages else await context.new_page()
+        page = await prepare_context_page(context)
         api_auth = {"headers": {}, "token": ""}
         capture_tasks = set()
 
@@ -510,7 +602,7 @@ async def cancel_scheduled_reservation(settings, day: str, period: str) -> SeatR
     account_settings = settings
     profile = Path(account_settings.profile_path)
     async with LockedBrowser(profile, headless=True) as context:
-        page = context.pages[0] if context.pages else await context.new_page()
+        page = await prepare_context_page(context)
         api_auth = {"headers": {}, "token": ""}
         capture_tasks = set()
 
@@ -526,12 +618,14 @@ async def cancel_scheduled_reservation(settings, day: str, period: str) -> SeatR
             raise RuntimeError("未能自动登录，无法取消当前预约")
         await wait_for_authenticated_page(page, timeout_ms=30000)
         records = await fetch_user_reservations(page, api_auth)
-        active = blocking_cancelable_reservations_for_day(records, day, datetime.now())
-        if not active:
+        targets = _cancel_targets_for_period(account_settings, day, period, records)
+        if targets is None:
+            return SeatResult(False, message=f"无法唯一确定要取消的{period}预约，已停止", conclusive=False)
+        if not targets:
             return SeatResult(True, message="当前预约已不存在，无需重复取消")
-        if len(active) != 1:
-            return SeatResult(False, message="当天存在多个有效预约，无法安全确定要取消的记录", conclusive=False)
-        target = active[0]
+        if len(targets) != 1:
+            return SeatResult(False, message=f"无法唯一确定要取消的{period}预约", conclusive=False)
+        target = targets[0]
         try:
             navigation = page.get_by_text("我的预约", exact=True).last
             if await navigation.count():
@@ -545,10 +639,57 @@ async def cancel_scheduled_reservation(settings, day: str, period: str) -> SeatR
         deadline = asyncio.get_running_loop().time() + 15
         while asyncio.get_running_loop().time() < deadline:
             current = await fetch_current_reservations(page, await wait_for_api_auth(page, api_auth))
-            if not blocking_cancelable_reservations_for_day(current, day, datetime.now()):
+            remaining = _cancel_targets_for_period(account_settings, day, period, current)
+            if remaining == []:
                 return SeatResult(True, message="取消成功")
             await page.wait_for_timeout(1000)
         return SeatResult(False, message="取消后仍能读取到有效预约，结果不明确", conclusive=False)
+
+
+def _cancel_targets_for_period(settings, day: str, period: str, records: list[dict]) -> list[dict] | None:
+    active = [
+        item for item in day_reservations(records or [], day)
+        if reservation_state(item) in {"reserved", "in_use"}
+    ]
+    if not active:
+        return []
+    try:
+        repository = Repository(str(settings.db_path), settings.account_id)
+        expected = repository.get_reservation(day, period)
+    except Exception:
+        expected = None
+    if expected is not None:
+        matched = find_cancelable_reservation(active, day, expected)
+        if matched is not None:
+            return [matched]
+        expected_end = _clock_minutes_for_record(expected.get("end", ""))
+        if expected_end is not None:
+            # A different-period booking should not prevent this period from
+            # being confirmed as absent.  Same-end active rows remain
+            # ambiguous because they may be the stale target with a changed
+            # start/location snapshot.
+            same_end = [
+                item for item in active
+                if _clock_minutes_for_record(
+                    item.get("end") or item.get("endTime") or item.get("finishTime")
+                ) == expected_end
+            ]
+            if not same_end:
+                return []
+        # An active row exists but it does not match the local snapshot.  An
+        # empty list here would falsely report success without clicking it.
+        return None
+    # Without a saved local interval/seat there is no safe way to associate an
+    # arbitrary active row with this period. Do not cancel the only row by
+    # accident just because it happens to be the only row returned today.
+    return None
+
+
+def _clock_minutes_for_record(value) -> int | None:
+    match = re.search(r"(?<!\d)(\d{1,2}):([0-5]\d)(?!\d)", str(value or ""))
+    if not match:
+        return None
+    return int(match.group(1)) * 60 + int(match.group(2))
 
 
 async def _click_cancel_for_record(page, record: dict) -> bool:
@@ -610,16 +751,16 @@ def send_preview_notification(notifier, args, result) -> bool:
         getattr(args, "account_label", "") or getattr(args, "account_id", ""),
     )
     if sent:
-        print("企业微信通知已发送。")
+        _runtime_print("企业微信通知已发送。")
     else:
-        print("企业微信通知未发送（未配置或发送失败）。")
+        _runtime_print("企业微信通知未发送（未配置或发送失败）。")
     return sent
 
 
 def pause_for_manual_interaction(message: str, interactive: bool = True) -> bool:
     """Pause only for a human when the caller explicitly allows interaction."""
     if not interactive:
-        print(f"无人值守模式：{message} 已停止等待人工操作。")
+        _runtime_print(f"无人值守模式：{message} 已停止等待人工操作。")
         return False
     input(message)
     return True
@@ -830,12 +971,14 @@ async def wait_for_reservation_confirmation(
     pre_submit_reservations: list[dict] | None = None,
     timeout_ms: int = 45000,
     submission_signal: tuple[str, str] = ("", ""),
+    reauthenticate=None,
 ) -> tuple[str, dict | None, str]:
     deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
     last_error = ""
     last_message = ""
     last_status = "uncertain"
     attempt = 0
+    authentication_rebuilt = False
     while asyncio.get_running_loop().time() < deadline:
         try:
             reservations = await fetch_post_submit_reservations(page, await wait_for_api_auth(page, auth_state))
@@ -849,48 +992,97 @@ async def wait_for_reservation_confirmation(
             last_message = message
             if status in {"success", "failed"}:
                 return status, matched, message
+        except AuthenticationError as exc:
+            last_error = str(exc)
+            if reauthenticate is not None and not authentication_rebuilt:
+                authentication_rebuilt = True
+                try:
+                    _runtime_print("预约核验接口认证失效，正在重新认证；只重新核验，不重复提交。")
+                    await reauthenticate()
+                    continue
+                except Exception as rebuild_error:
+                    last_error = f"{last_error}；重新认证失败：{rebuild_error}"
         except Exception as exc:
             last_error = str(exc)
         await page.wait_for_timeout(reservation_verification_delay(attempt))
         attempt += 1
-    if last_status == "pending":
-        try:
-            reservations = await fetch_user_reservations(page, auth_state)
-            page_text = await page.locator("body").inner_text()
-            last_status, matched, last_message = reservation_verification_status(
-                reservations, page_text, day, room, seat, start, end,
-                submission_signal=submission_signal,
-                pre_submit_reservations=pre_submit_reservations,
-            )
-            if last_status == "success":
-                return last_status, matched, last_message
-        except Exception as exc:
-            last_error = str(exc)
-        return "pending", None, last_message or last_error
-    return "uncertain", None, last_error or last_message or "提交后未在我的预约历史中找到完全匹配记录"
+    # Final authoritative check with the full merged history+current query.
+    # The caller must get a conclusive outcome: success, or failure with the
+    # collected reason — never an open-ended pending state.
+    final_status = last_status
+    matched = None
+    final_message = ""
+    try:
+        reservations = await fetch_user_reservations(page, auth_state)
+        page_text = await page.locator("body").inner_text()
+        final_status, matched, final_message = reservation_verification_status(
+            reservations, page_text, day, room, seat, start, end,
+            submission_signal=submission_signal,
+            pre_submit_reservations=pre_submit_reservations,
+        )
+        if final_status == "success":
+            return final_status, matched, final_message
+    except AuthenticationError as exc:
+        last_error = f"{last_error}；最终核验失败：{exc}" if last_error else f"最终核验失败：{exc}"
+    except Exception as exc:
+        last_error = f"{last_error}；最终核验失败：{exc}" if last_error else f"最终核验失败：{exc}"
+    if final_status == "failed":
+        return "failed", matched, final_message or last_message
+    if submission_signal[0] == "success":
+        # The site itself reported success; a lagging history endpoint must
+        # not turn that into a failure claim.
+        return "success", matched, "网站已提示预约成功，‘我的预约’接口暂未同步到该记录"
+    reason = last_message or last_error or "提交后未在‘我的预约’中找到该预约"
+    return "failed", None, f"未在‘我的预约’中找到该预约，判定未预约成功：{reason}"
+
+
+async def reauthenticate_reservation_session(page, auth_state: dict, settings) -> None:
+    """Rebuild a stale reservation session after an authenticated API failure."""
+    auth_state.clear()
+    auth_state.update({"headers": {}, "token": ""})
+    try:
+        await page.evaluate(
+            """() => {
+                localStorage.clear();
+                sessionStorage.clear();
+            }"""
+        )
+    except Exception:
+        pass
+    try:
+        await page.context.clear_cookies()
+    except Exception:
+        pass
+    await page.goto(settings.login_url, wait_until="domcontentloaded")
+    logged_in = await login_if_configured(page, settings)
+    if not logged_in and not is_seat_app_url(page.url):
+        raise AuthenticationError("预约核验重新认证失败：未进入座位预约首页")
+    await wait_for_authenticated_page(page, timeout_ms=30000)
 
 
 async def login_if_configured(page, settings=None):
+    if is_seat_app_url(page.url):
+        await dismiss_stale_booking_overlay(page)
     account = (settings.account if settings is not None else os.getenv("SEAT_ACCOUNT", "")).strip()
     password = (settings.password if settings is not None else os.getenv("SEAT_PASSWORD", "")).strip()
     if not credentials_available(account, password):
-        print("账号凭据为空，将复用浏览器会话；若未登录请先手动登录。")
+        _runtime_print(f"账号 {getattr(settings, 'account_id', 'default')} 未配置凭据，复用浏览器会话。")
         return False
     if is_seat_app_url(page.url):
         body_text = await page.locator("body").inner_text()
         reason = login_failure_message(body_text)
         if not reason:
-            print(f"账号 {getattr(settings, 'account_id', 'default')} 浏览器会话已经登录，跳过账号密码填写。")
+            _runtime_print(f"账号 {getattr(settings, 'account_id', 'default')} 浏览器会话已登录。")
             return True
         raise RuntimeError(f"登录失败：{reason}")
     if "#/login" in page.url:
         try:
             await wait_for_authenticated_page(page, timeout_ms=15000)
-            print("座位系统已通过现有会话登录，跳过账号密码填写。")
+            _runtime_print(f"账号 {getattr(settings, 'account_id', 'default')} 已通过现有会话登录。")
             return True
         except Exception:
             pass
-    print("检测到本地凭据，正在自动填写统一身份认证。")
+    _runtime_print(f"账号 {getattr(settings, 'account_id', 'default')} 开始统一身份认证登录。")
     captcha = page.locator(", ".join(captcha_input_selectors())).first
     captcha_visible = await captcha.count() > 0 and await captcha.is_visible()
     user = page.locator("input[name='username'], input[name='userName'], input[placeholder*='账号'], input[placeholder*='用户名']").first
@@ -918,7 +1110,7 @@ async def login_if_configured(page, settings=None):
             body_text = await page.locator("body").inner_text()
             reason = login_failure_message(body_text)
             if login_attempt == 0 and is_captcha_failure_message(reason):
-                print(f"登录验证码校验失败：{reason}；正在刷新验证码并重试一次。")
+                _runtime_print(f"登录验证码校验失败：{reason}；刷新验证码后重试。")
                 await refresh_login_captcha(page, getattr(settings, "login_url", SITE_URL))
                 continue
             if reason:
@@ -952,7 +1144,7 @@ async def refresh_login_captcha(page, login_url: str | None = None) -> None:
         pass
     image_locator = page.locator(", ".join(captcha_image_selectors())).first
     if await image_locator.count() == 0 or not await image_locator.is_visible():
-        print("验证码失败后未找到可点击的验证码图片，将直接重新读取登录表单。")
+        _runtime_print("验证码失败后未找到可刷新图片，重新读取登录表单。")
         return
     try:
         await image_locator.click(force=True)
@@ -960,24 +1152,24 @@ async def refresh_login_captcha(page, login_url: str | None = None) -> None:
         try:
             await image_locator.evaluate("element => element.click()")
         except Exception:
-            print("验证码图片刷新失败，将直接重新读取登录表单。")
+            _runtime_print("验证码图片刷新失败，重新读取登录表单。")
             return
     await page.wait_for_timeout(500)
 
 
 async def solve_captcha_if_configured(page, settings, captcha_input):
     if settings is None or not getattr(settings, "captcha_llm_enabled", False):
-        print("检测到登录验证码，但验证码模型未启用。")
+        _runtime_print("检测到登录验证码，但验证码模型未启用。")
         return None
     image_locator = page.locator(", ".join(captcha_image_selectors())).first
     if await image_locator.count() == 0 or not await image_locator.is_visible():
-        print("检测到验证码输入框，但未找到可截图的验证码图片。")
+        _runtime_print("检测到验证码输入框，但未找到可截图的验证码图片。")
         return None
     image_bytes = await image_locator.screenshot(type="png")
     prompt_text = await page.locator("body").inner_text()
     kind = captcha_kind_from_text(prompt_text)
     if kind == "auto":
-        print("验证码类型不明确，交给视觉模型判断并进行严格格式校验。")
+        _runtime_print("验证码类型不明确，交给视觉模型判断。", verbose=True)
     client = QwenCaptchaClient(
         settings.captcha_llm_api_key,
         settings.captcha_llm_base_url,
@@ -987,10 +1179,10 @@ async def solve_captcha_if_configured(page, settings, captcha_input):
     for attempt in range(1, settings.captcha_llm_max_attempts + 1):
         try:
             answer = client.solve(image_bytes, "image/png", kind)
-            print(f"验证码视觉识别得到合规答案（第 {attempt} 次），准备提交登录。")
+            _runtime_print(f"验证码识别成功（第 {attempt} 次），准备提交登录。")
             return answer
         except CaptchaVisionError as exc:
-            print(f"验证码视觉识别第 {attempt} 次未通过：{exc}")
+            _runtime_print(f"验证码识别失败（第 {attempt} 次，类型={exc.category}）：{exc}")
             if attempt < settings.captcha_llm_max_attempts:
                 await page.wait_for_timeout(2500)
     return None
@@ -1058,12 +1250,23 @@ async def fetch_user_reservations_with_capabilities(page, auth_state: dict) -> t
     try:
         history = await fetch_reservation_history(page, auth)
         capabilities["history"] = True
+    except AuthenticationError as exc:
+        # Legacy deployments use business code 12 to signal that the history
+        # view is unavailable while the lighter current endpoint still works.
+        # Keep that compatibility fallback; HTTP/ business 401/403 remain
+        # authentication failures and must rebuild the session.
+        if "code=12" not in str(exc):
+            raise
+        history = []
+        history_error = str(exc)
     except RuntimeError as exc:
         history = []
         history_error = str(exc)
     try:
         current = await fetch_current_reservations(page, auth)
         capabilities["current_reservations"] = True
+    except AuthenticationError:
+        raise
     except RuntimeError as exc:
         current = []
         current_error = str(exc)
@@ -1110,13 +1313,22 @@ async def _fetch_history_pages(page, auth: dict, page_size: int) -> list[dict]:
 
 async def fetch_current_reservations(page, auth: dict) -> list[dict]:
     """Read the web client's paginated “我的预约” history endpoint."""
+    history_error = None
     try:
         records = await _fetch_history_pages(page, auth, page_size=6)
-    except RuntimeError as history_error:
+    except AuthenticationError as exc:
+        history_error = exc
+        if "code=12" not in str(history_error):
+            raise
+    except RuntimeError as exc:
+        history_error = exc
+    if history_error is not None:
         # Older deployments may still expose the former lightweight endpoint.
         endpoint = f"/rest/v2/user/reservations?token={quote(auth['token'], safe='')}"
         try:
             body = await fetch_reservation_payload(page, endpoint, auth["headers"], "读取当前预约")
+        except AuthenticationError:
+            raise
         except RuntimeError:
             raise history_error
         records, _ = history_page_records(body)
@@ -1128,6 +1340,8 @@ async def fetch_current_reservations(page, auth: dict) -> list[dict]:
     endpoint = f"/rest/v2/user/reservations?token={quote(auth['token'], safe='')}"
     try:
         body = await fetch_reservation_payload(page, endpoint, auth["headers"], "读取当前预约")
+    except AuthenticationError:
+        raise
     except RuntimeError:
         return records
     current, _ = history_page_records(body)
@@ -1154,11 +1368,17 @@ async def fetch_reservation_payload(page, endpoint: str, headers: dict, label: s
         }""",
         {"endpoint": endpoint, "headers": headers},
     )
-    if payload.get("status") != 200:
-        raise RuntimeError(f"{label}失败：HTTP {payload.get('status')}")
+    response_status = payload.get("status")
+    if response_status in {401, 403}:
+        raise AuthenticationError(f"{label}失败：HTTP {response_status}")
+    if response_status != 200:
+        raise RuntimeError(f"{label}失败：HTTP {response_status}")
     body = payload.get("body") or {}
     if body.get("code") not in (None, 0, "0"):
-        raise RuntimeError(f"{label}失败：code={body.get('code')}，message={body.get('message') or '无'}")
+        message = f"{label}失败：code={body.get('code')}，message={body.get('message') or '无'}"
+        if str(body.get("code") or "").strip() in {"401", "403"} or is_authentication_error(message):
+            raise AuthenticationError(message)
+        raise RuntimeError(message)
     return body
 
 
@@ -1192,7 +1412,7 @@ async def select_library(page, name):
         raise RuntimeError("未找到图书馆选择框，请确认已进入座位预约首页。")
     current = await selector.input_value()
     if library_selected(current, name):
-        print(f"图书馆已经是‘{name}’，无需切换。")
+        _runtime_print(f"图书馆保持为‘{name}’。", verbose=True)
         return
     last_error = None
     for attempt in range(1, 4):
@@ -1202,7 +1422,7 @@ async def select_library(page, name):
             await page.wait_for_timeout(300 + attempt * 200)
             selected = await selector.input_value()
             if library_selected(selected, name):
-                print(f"图书馆已切换为：{selected}")
+                _runtime_print(f"图书馆已切换为‘{selected}’。", verbose=True)
                 return
             last_error = RuntimeError(f"当前显示‘{selected}’")
         except Exception as exc:
@@ -1219,7 +1439,7 @@ async def select_date(page, target_date):
         raise RuntimeError("未找到预约日期选择框。")
     current = (await selector.input_value()).strip()
     if current == target_date:
-        print(f"预约日期已经是：{target_date}")
+        _runtime_print(f"预约日期保持为‘{target_date}’。", verbose=True)
         return
     await selector.click()
     # This is an Element UI select, not an editable date input. Choose the
@@ -1246,7 +1466,7 @@ async def select_date(page, target_date):
     current = (await selector.input_value()).strip()
     if current != target_date:
         raise RuntimeError(f"预约日期切换未生效：当前为‘{current}’，目标为‘{target_date}’。请检查日期是否已开放。")
-    print(f"预约日期已切换为：{current}")
+    _runtime_print(f"预约日期已切换为‘{current}’。", verbose=True)
 
 
 async def click_and_verify_time(page, value, label, verify=True):
@@ -1305,8 +1525,20 @@ async def wait_for_time_option(page, value, label, timeout_ms=30000):
 
 async def close_time_dialog(page):
     dialogs = page.locator(".el-dialog:visible")
+    mask = page.locator(".reserve-time-Mask:visible")
+    try:
+        dialog_count = await dialogs.count()
+    except Exception:
+        dialog_count = 0
+    try:
+        mask_count = await mask.count()
+    except Exception:
+        mask_count = 0
+    if not dialog_count and not mask_count:
+        return
     buttons = dialogs.locator(".el-dialog__headerbtn")
-    if await buttons.count():
+    button_count = await buttons.count()
+    if button_count:
         await buttons.last.click()
     else:
         await page.keyboard.press("Escape")
@@ -1315,11 +1547,6 @@ async def close_time_dialog(page):
     # Some deployments keep the time picker behind a custom mask instead of
     # wiring the Element UI header button to the same close handler. Click the
     # mask's corner first, then fall back to Escape if it remains visible.
-    mask = page.locator(".reserve-time-Mask:visible")
-    try:
-        mask_count = await mask.count()
-    except Exception:
-        mask_count = 0
     if mask_count:
         target = getattr(mask, "last", mask)
         try:
@@ -1355,7 +1582,39 @@ async def close_time_dialog(page):
         except Exception:
             count = 0
         if count:
-            raise RuntimeError(f"时间选择弹层未关闭，阻塞层仍可见：{selector}")
+            # Surface what the overlay actually says: restriction/blacklist
+            # notices look exactly like a stuck dialog here.
+            overlay_text = ""
+            try:
+                overlay_text = (await locator.first.inner_text()).strip()
+            except Exception:
+                pass
+            detail = f"，内容：{overlay_text[:120]}" if overlay_text else ""
+            raise RuntimeError(f"时间选择弹层未关闭，阻塞层仍可见：{selector}{detail}")
+
+
+async def recover_time_dialog(page, restore_page, hard_reset: bool = False) -> bool:
+    """Restore a fresh booking page only when the time picker cannot close."""
+    try:
+        await close_time_dialog(page)
+    except RuntimeError:
+        if restore_page is None:
+            raise
+        if hard_reset:
+            try:
+                await page.evaluate("() => { sessionStorage.clear(); }")
+            except Exception:
+                pass
+        await restore_page()
+        if hard_reset:
+            # A cleared overlay may still be re-rendered once; dismiss again
+            # before the next candidate reuses the page.
+            try:
+                await close_time_dialog(page)
+            except RuntimeError:
+                pass
+        return True
+    return False
 
 
 async def close_success_dialog(page, timeout_ms=5000):

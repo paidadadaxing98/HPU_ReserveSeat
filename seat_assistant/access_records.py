@@ -20,6 +20,8 @@ def is_authentication_error(message: str) -> bool:
         or "http 403" in text
         or "登录失败" in text
         or "认证失败" in text
+        or "登录验证码" in text
+        or "验证码视觉模型" in text
     )
 
 
@@ -57,6 +59,8 @@ class BrowserAccessRecordProvider:
             return await self._finish_open()
         except Exception as exc:
             should_fallback = isinstance(exc, AuthenticationError) or is_authentication_error(str(exc))
+            if should_fallback:
+                await self.invalidate_authentication()
             await self.close()
             if not should_fallback or getattr(self.settings, "dynamic_manual_login_timeout_seconds", 0) <= 0:
                 if should_fallback:
@@ -65,12 +69,12 @@ class BrowserAccessRecordProvider:
             return await self._open_manual(profile)
 
     async def _open_context(self, profile: Path, headless: bool):
-        from .browser_session import LockedBrowser
+        from .browser_session import LockedBrowser, prepare_context_page
         from scripts.preview_reservation import capture_page_request
 
         self.browser = LockedBrowser(profile, headless=headless)
         self.context = await self.browser.__aenter__()
-        self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+        self.page = await prepare_context_page(self.context)
 
         def capture_request(request):
             task = asyncio.create_task(capture_page_request(self.api_auth, request))
@@ -107,6 +111,12 @@ class BrowserAccessRecordProvider:
         raise AuthenticationError("独立监控会话人工登录超时或健康检查未通过")
 
     async def close(self):
+        capture_tasks, self.capture_tasks = self.capture_tasks, set()
+        for task in capture_tasks:
+            if not task.done():
+                task.cancel()
+        if capture_tasks:
+            await asyncio.gather(*capture_tasks, return_exceptions=True)
         if self.browser is not None:
             browser, self.browser = self.browser, None
             self.context = None
@@ -114,6 +124,28 @@ class BrowserAccessRecordProvider:
             self.activation_code = ""
             self.api_auth = {"headers": {}, "token": ""}
             await browser.__aexit__(None, None, None)
+
+    async def invalidate_authentication(self) -> None:
+        """Remove stale browser credentials before an authentication rebuild."""
+        page, context = self.page, self.context
+        self.api_auth = {"headers": {}, "token": ""}
+        self.activation_code = ""
+        if page is not None:
+            try:
+                if not page.is_closed():
+                    await page.evaluate(
+                        """() => {
+                            localStorage.clear();
+                            sessionStorage.clear();
+                        }"""
+                    )
+            except Exception:
+                pass
+        if context is not None:
+            try:
+                await context.clear_cookies()
+            except Exception:
+                pass
 
     async def health_check(self) -> list[dict]:
         """Require a successful authenticated reservation API request."""
@@ -130,19 +162,29 @@ class BrowserAccessRecordProvider:
             raise
 
     async def reservation_records(self, day: str) -> list[dict]:
-        """Read the site's paginated “我的预约” records in the same session."""
+        """Read the site's full “我的预约” records in the same session.
+
+        Uses the same merged history+current query as the booking flow so the
+        monitor still sees a new reservation while the paginated history view
+        is syncing.
+        """
         if self.page is None:
             raise RuntimeError("预约查询浏览器会话尚未建立")
-        from scripts.preview_reservation import fetch_current_reservations, wait_for_api_auth
+        from scripts.preview_reservation import fetch_user_reservations, wait_for_api_auth
+        from .submission import _extract_date
 
         auth = await wait_for_api_auth(self.page, self.api_auth)
         try:
-            records = await fetch_current_reservations(self.page, auth)
+            records = await fetch_user_reservations(self.page, auth)
         except RuntimeError as exc:
             if is_authentication_error(str(exc)):
                 raise AuthenticationError(str(exc)) from exc
             raise
-        return [record for record in records if _record_day(record) == day]
+        return [
+            record
+            for record in records or []
+            if isinstance(record, dict) and (_extract_date(record) or "") == day
+        ]
 
     async def records(self, day: str) -> list[dict]:
         if self.page is None or not self.settings.access_records_url or not self.activation_code:
@@ -244,8 +286,57 @@ async def read_activation_code(page) -> str:
     await labels.last.click()
     dialogs = page.locator(".el-dialog:visible, [role='dialog']:visible, .el-dialog__wrapper:visible")
     await dialogs.first.wait_for(state="visible", timeout=5000)
-    text = await dialogs.last.inner_text()
-    return extract_activation_code(text)
+    dialog = dialogs.last
+    try:
+        text = await dialog.inner_text()
+        code = extract_activation_code(text)
+    finally:
+        await close_visible_dialog(page, dialog, timeout_ms=3000)
+    return code
+
+
+async def close_visible_dialog(page, dialog, timeout_ms: int = 3000) -> None:
+    """Close a known modal and verify it no longer blocks the page."""
+    buttons = dialog.locator(
+        ".el-dialog__headerbtn, .el-message-box__headerbtn, "
+        "button[aria-label*='关'], [role='button'][aria-label*='关']"
+    )
+    try:
+        count = await buttons.count()
+    except Exception:
+        count = 0
+    clicked = False
+    if count:
+        target = buttons.last
+        try:
+            if await target.is_visible():
+                await target.click()
+                clicked = True
+        except Exception:
+            clicked = False
+    if not clicked:
+        try:
+            actions = dialog.get_by_role("button", name=re.compile("关闭|确定|我知道了|知道了|返回"))
+            for index in range(await actions.count()):
+                target = actions.nth(index)
+                if await target.is_visible():
+                    await target.click()
+                    clicked = True
+                    break
+        except Exception:
+            pass
+    if not clicked:
+        await page.keyboard.press("Escape")
+    try:
+        await dialog.wait_for(state="hidden", timeout=timeout_ms)
+        return
+    except Exception as first_error:
+        try:
+            await page.keyboard.press("Escape")
+            await dialog.wait_for(state="hidden", timeout=timeout_ms)
+            return
+        except Exception as second_error:
+            raise RuntimeError("弹窗关闭后仍可见，已停止复用当前浏览器会话") from second_error
 
 
 async def fetch_access_records(page, endpoint: str, activation_code: str, label: str = "读取门禁记录") -> list[dict]:

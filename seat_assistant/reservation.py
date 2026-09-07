@@ -12,6 +12,8 @@ class SeatResult:
 
 
 class DryRunReservation:
+    is_dry_run = True
+
     def reserve(self, date, period, start, end) -> SeatResult:
         return SeatResult(True, "演练阅览室", "演练座位", "dry-run；未提交真实预约")
 

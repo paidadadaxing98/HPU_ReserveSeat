@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from datetime import date, datetime
 from pathlib import Path
 import uuid
@@ -18,6 +19,43 @@ _WEBHOOK_URL = "https://seatlib.hpu.edu.cn/libseat/"
 _LOGIN_URL = "https://seatlib.hpu.edu.cn/libseat/#/login"
 
 
+def render_short_scheduler_message(message: str, limit: int = 48) -> str:
+    text = " ".join(str(message or "").split())
+    text = re.sub(r"^(?:定时预约流程异常：|预约流程异常：)", "", text)
+    missing = re.search(
+        r"没有找到同时满足\s*(\d{1,2}:\d{2})-(\d{1,2}:\d{2}).*?不包含\s*(\d{1,2}:\d{2})",
+        text,
+    )
+    if missing:
+        text = f"未开放：可选时间不含{missing.group(3)}"
+    match = re.search(
+        r"当天未开放.*?可选(?:开始)?时间从\s*(\d{1,2}:\d{2})\s*起，不含\s*(\d{1,2}:\d{2})",
+        text,
+    )
+    if match:
+        text = f"当天未开放：可选时间从{match.group(1)}起，不含{match.group(2)}"
+    elif "时间选择弹层" in text or "reserve-time-Mask" in text:
+        text = "时间弹窗未关闭，已停止本次操作"
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    return text
+
+
+def _scheduler_status_label(status: str) -> str:
+    return {
+        "reserved": "已预约",
+        "uncertain": "预约失败",
+        "failed": "预约失败",
+        "cancelled": "已取消",
+        "missed": "已失约",
+        "pending": "等待中",
+        "waiting": "等待中",
+        "skipped": "已跳过",
+        "completed": "已完成",
+        "progressed": "进行中",
+    }.get(str(status), str(status))
+
+
 def render_reservation(day: str, period: str, result, start: str, end: str, account_label: str | None = None) -> str:
     display = account_label or "未提供"
     try:
@@ -27,16 +65,13 @@ def render_reservation(day: str, period: str, result, start: str, end: str, acco
     if result.success:
         status = "已确认"
         title = "预约成功确认"
-    elif not result.conclusive and str(result.message or "").lstrip().startswith("已提交"):
-        status = "已提交，待核验"
-        title = "预约提交确认"
-    elif result.conclusive:
+    else:
+        # Results are resolved in fresh windows before notifying: anything
+        # that could not be confirmed is reported as a failure with its
+        # reason, never as an open-ended pending state.
         status = "预约失败"
         title = "预约失败通知"
-    else:
-        status = "结果不明确"
-        title = "预约结果通知"
-    explanation = result.message or "无"
+    explanation = render_short_scheduler_message(result.message or "无")
     date_value = f"**{day}**{f' ({weekday})' if weekday else ''}"
     room = result.room or "未提供"
     return "\n".join(
@@ -63,6 +98,15 @@ def send_reservation_notification(notifier, day: str, period: str, result, start
         return False
     try:
         card = reservation_card(day, period, result, start, end, account_label, getattr(notifier, "login_url", None))
+        logging.getLogger(__name__).info(
+            "预约通知：%s %s %s-%s 状态=%s 说明=%s",
+            account_label or "-",
+            day,
+            start,
+            end,
+            "成功" if result.success else "失败",
+            str(result.message or "")[:160],
+        )
         send_card = getattr(notifier, "send_template_card", None)
         return bool(send_card(card) if send_card else notifier.send(render_reservation(day, period, result, start, end, account_label)))
     except Exception as exc:
@@ -72,7 +116,7 @@ def send_reservation_notification(notifier, day: str, period: str, result, start
 
 def render_scheduler_summary(account_id: str, day: str, summary: dict, account_label: str | None = None) -> str:
     status = str(summary.get("status") or "completed")
-    label = {"reserved": "已完成", "skipped": "已跳过", "uncertain": "结果不明确", "completed": "已运行"}.get(status, status)
+    label = {"reserved": "已完成", "skipped": "已跳过", "uncertain": "预约失败", "completed": "已运行"}.get(status, status)
     display = account_label or account_id
     lines = [
         "## 📋 定时任务结果",
@@ -85,7 +129,7 @@ def render_scheduler_summary(account_id: str, day: str, summary: dict, account_l
         f"| ✅ **状态** | **{label}** |",
     ]
     if summary.get("message"):
-        lines.append(f"| 📝 **说明** | {summary['message']} |")
+        lines.append(f"| 📝 **说明** | {render_short_scheduler_message(summary['message'])} |")
     ordered_periods = ("morning", "afternoon", "evening", "period04", "period05")
     seen = set()
     for period in ordered_periods:
@@ -94,15 +138,15 @@ def render_scheduler_summary(account_id: str, day: str, summary: dict, account_l
             continue
         seen.add(period)
         period_label = _PERIOD_LABELS.get(period, period)
-        item_status = result.get("status", "unknown")
-        item_message = result.get("message", "")
+        item_status = _scheduler_status_label(result.get("status", "unknown"))
+        item_message = render_short_scheduler_message(result.get("message", ""))
         lines.append(f"| {period_label} | {item_status}{f'，{item_message}' if item_message else ''} |")
     for period, result in summary.items():
         if period in {"status", "message", "account_id"} or period in seen or not isinstance(result, dict):
             continue
         period_label = _PERIOD_LABELS.get(period, period)
-        item_status = result.get("status", "unknown")
-        item_message = result.get("message", "")
+        item_status = _scheduler_status_label(result.get("status", "unknown"))
+        item_message = render_short_scheduler_message(result.get("message", ""))
         lines.append(f"| {period_label} | {item_status}{f'，{item_message}' if item_message else ''} |")
     return "\n".join(lines)
 
@@ -202,18 +246,18 @@ def reservation_card(day: str, period: str, result, start: str, end: str, accoun
     label = _PERIOD_LABELS.get(period, period)
     if result.success:
         title, status = "预约成功确认", "已确认"
-    elif not result.conclusive:
-        title, status = "预约结果待核验", "结果不明确"
     else:
+        # Keep the template card conclusive: unconfirmed submissions are
+        # reported as failures and the reason travels in the text render.
         title, status = "预约失败通知", "预约失败"
-    explanation = result.message or "无"
     fields = [
         {"keyname": "账号", "value": account_label or "未提供"},
         {"keyname": "日期", "value": day},
         {"keyname": "时段", "value": f"{start} — {end}"},
         {"keyname": "阅览室", "value": result.room or "未提供"},
         {"keyname": "座位", "value": result.seat or "未提供"},
-        {"keyname": "状态", "value": f"{status}（{explanation}）"},
+        # Template cards have limited space; keep the status field a stable short label.
+        {"keyname": "状态", "value": status},
     ]
     return {
         "msgtype": "template_card",

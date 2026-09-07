@@ -6,24 +6,23 @@ import re
 PERIODS = {"上午": "morning", "下午": "afternoon", "晚上": "evening"}
 REMOTE_COMMAND_KINDS = frozenset({"cancel_day", "cancel", "delay", "status"})
 REMOTE_COMMAND_HELP = (
-    "支持命令：今天不去了、取消上午、取消下午、取消晚上、"
-    "上午推迟到 HH:MM、下午推迟到 HH:MM、晚上推迟到 HH:MM、"
-    "以后上午/下午/晚上默认到馆时间为 HH:MM、状态"
+    "命令列表：\n"
+    "帮助\n"
+    "状态\n"
+    "今天不去了\n"
+    "取消【上午/下午/晚上】\n"
+    "【上午/下午/晚上】推迟到 HH:MM[-HH:MM]（按时段直接预约，最长4小时）\n"
+    "以后【上午/下午/晚上】默认到馆时间为 HH:MM[-HH:MM]（后半为默认结束时间）\n"
+    "启用账号 / 关闭账号 [账号或别名]"
 )
-BOT_COMMAND_HELP = (
-    "可用命令：帮助、状态、今天不去了、取消上午、取消下午、取消晚上；"
-    "上午推迟到 HH:MM、下午推迟到 HH:MM、晚上推迟到 HH:MM；"
-    "以后上午默认到馆时间为 HH:MM、以后下午默认到馆时间为 HH:MM、"
-    "以后晚上默认到馆时间为 HH:MM；"
-    "推文 <账号或别名> 标题 | 链接 [| 备注]"
-)
-
+BOT_COMMAND_HELP = REMOTE_COMMAND_HELP + "\n推文 【账号或别名】 标题 | 链接 [| 备注]"
 
 @dataclass(frozen=True)
 class Command:
     kind: str
     period: str | None = None
     at: str | None = None
+    end: str | None = None
     target: str | None = None
     title: str | None = None
     url: str | None = None
@@ -38,21 +37,35 @@ def parse_command(text: str) -> Command:
         return _parse_push_tweet(text)
     if text in {"今天不去了", "取消全天", "取消今天"}:
         return Command("cancel_day")
-    match = re.match(r"(上午|下午|晚上)\s*(?:推迟|延迟)\s*到\s*(\d{1,2}:\d{2})$", text)
+    match = re.match(
+        r"(上午|下午|晚上)\s*(?:推迟|延迟)\s*到\s*(\d{1,2}:\d{2})(?:\s*(?:-|到|—|~)\s*(\d{1,2}:\d{2}))?$",
+        text,
+    )
     if match:
         value = _valid_time(match.group(2))
-        return Command("delay", PERIODS[match.group(1)], value) if value else Command("help")
-    match = re.match(r"(?:推迟|延迟)\s*到\s*(\d{1,2}:\d{2})$", text)
+        end = _valid_time(match.group(3)) if match.group(3) else None
+        return Command("delay", PERIODS[match.group(1)], value, end) if value else Command("help")
+    match = re.match(
+        r"(?:推迟|延迟)\s*到\s*(\d{1,2}:\d{2})(?:\s*(?:-|到|—|~)\s*(\d{1,2}:\d{2}))?$",
+        text,
+    )
     if match:
         value = _valid_time(match.group(1))
-        return Command("ask_period", None, value) if value else Command("help")
+        end = _valid_time(match.group(2)) if match.group(2) else None
+        return Command("ask_period", None, value, end) if value else Command("help")
     match = re.match(r"(上午|下午|晚上)\s*(?:推迟|延迟)$", text)
     if match:
         return Command("ask_delay", PERIODS[match.group(1)])
-    match = re.match(r"(?:以后)?(上午|下午|晚上)默认(?:到馆)?(?:时间)?\s*(?:为|到)?\s*(\d{1,2}:\d{2})$", text)
+    match = re.match(
+        r"(?:以后)?(上午|下午|晚上)默认(?:到馆)?(?:时间)?\s*(?:为|到)?\s*(\d{1,2}:\d{2})(?:\s*(?:-|到|—|~)\s*(\d{1,2}:\d{2}))?$",
+        text,
+    )
     if match:
         value = _valid_time(match.group(2))
-        return Command("set_default", PERIODS[match.group(1)], value) if value else Command("help")
+        end = _valid_time(match.group(3)) if match.group(3) else None
+        if not value:
+            return Command("help")
+        return Command("set_default", PERIODS[match.group(1)], value, end)
     match = re.match(r"记录(上午|下午|晚上)到馆\s*(\d{1,2}:\d{2})$", text)
     if match:
         value = _valid_time(match.group(2))
@@ -60,6 +73,10 @@ def parse_command(text: str) -> Command:
     match = re.match(r"取消(上午|下午|晚上)$", text)
     if match:
         return Command("cancel", PERIODS[match.group(1)])
+    match = re.match(r"(启用|关闭)账号\s*(\S+)?$", text)
+    if match:
+        kind = "enable_account" if match.group(1) == "启用" else "disable_account"
+        return Command(kind, target=match.group(2))
     if text in {"状态", "查看状态"}:
         return Command("status")
     return Command("help")
